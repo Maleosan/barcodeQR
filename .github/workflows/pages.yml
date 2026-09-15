@@ -1,31 +1,36 @@
-name: Deploy StokQR to GitHub Pages
-
+name: Deploy StokQR
 on:
   push:
-    branches: [work, main]
+    branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
   pages: write
   id-token: write
-
 concurrency:
   group: pages
   cancel-in-progress: true
-
 jobs:
-  deploy:
+  test-and-deploy:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+      - run: npm run check
       - uses: actions/configure-pages@v5
+      - name: Prepare static site
+        run: |
+          mkdir _site
+          cp index.html styles.css manifest.webmanifest service-worker.js .nojekyll _site/
+          cp -R assets src _site/
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: public
-      - name: Deploy
-        id: deployment
+          path: _site
+      - id: deployment
         uses: actions/deploy-pages@v4

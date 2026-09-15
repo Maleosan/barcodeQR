@@ -1,0 +1,13 @@
+{
+  "name": "StokQR — Aplikasi Stok Gudang",
+  "short_name": "StokQR",
+  "description": "Master barang, scanner barcode dan transaksi stok gudang",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f4f7f5",
+  "theme_color": "#145c42",
+  "icons": [{"src":"./assets/icons/app-icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]
+}

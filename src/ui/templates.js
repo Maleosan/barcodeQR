@@ -1,0 +1,6 @@
+export const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+export const formatDateTime=value=>new Intl.DateTimeFormat('id-ID',{dateStyle:'medium',timeStyle:'short'}).format(new Date(value));
+export const typeLabel=type=>({IN:'STOK MASUK',OUT:'STOK KELUAR',ADJUSTMENT:'PENYESUAIAN'}[type]||type);
+export function statusFor(item){return item.stock===0?'HABIS':item.stock<=item.minimumStock?'MENIPIS':'AMAN';}
+export function emptyState(title,copy=''){return `<div class="empty"><span>□</span><strong>${escapeHtml(title)}</strong><p>${escapeHtml(copy)}</p></div>`;}
+export function transactionList(rows){if(!rows.length)return emptyState('Belum ada transaksi','Transaksi stok akan muncul di sini.');return `<div class="activity-list">${rows.map(row=>`<button class="activity" data-item-id="${row.itemId}"><span class="activity-icon ${row.type.toLowerCase()}">${row.type==='OUT'?'−':'+'}</span><span><strong>${escapeHtml(row.itemName)}</strong><small>${escapeHtml(row.itemCode)} · ${formatDateTime(row.createdAt)}</small></span><span class="activity-stock"><b>${row.type==='OUT'?'−':'+'}${row.quantity}</b><small>${row.stockBefore} → ${row.stockAfter}</small></span></button>`).join('')}</div>`;}

@@ -1,83 +1,62 @@
-# StokQR Web
+# StokQR — Aplikasi Stok Gudang
 
-Aplikasi stok gudang berbasis web/PWA yang responsif untuk desktop, Android, iPhone, dan tablet. Implementasi Android native sebelumnya telah dihapus sesuai perubahan arah proyek.
+Static web/PWA untuk master barang, scan barcode/QR, stock opname cepat, transaksi stok, dashboard, dan laporan CSV. Aplikasi ditujukan untuk desktop, Android, iPhone, dan tablet; data MVP disimpan lokal per browser.
 
-## Audit dan keputusan teknologi
+## Teknologi
 
-Repositori awal hanya berisi aplikasi Android Kotlin/Compose. Karena aplikasi kini harus berjalan lintas perangkat dan implementasi native tidak ingin dipertahankan, proyek Android dibersihkan dan diganti satu proyek web.
+- HTML, CSS, dan JavaScript ES modules tanpa framework/bundler.
+- IndexedDB dengan repository layer; stok dan transaksi ditulis atomik.
+- `@zxing/browser` 0.1.5 dari jsDelivr sebagai decoder utama multi-format. `BarcodeDetector` hanya fallback ketika CDN gagal dan browser mendukungnya.
+- QR encoder lokal untuk identifier `BRG-xxxxx`.
+- Web App Manifest dan Service Worker untuk PWA/application shell offline.
+- Node.js development server tanpa dependency npm.
 
-Stack MVP sengaja sederhana dan tanpa dependency eksternal:
-
-- **HTML, CSS, dan JavaScript ES modules**: tidak memerlukan bundler atau registry package.
-- **IndexedDB repository**: database transaksional browser untuk MVP offline/single-device.
-- **Service layer**: validasi dan use case terpisah dari IndexedDB agar repository dapat diganti REST API/backend kelak.
-- **MediaDevices + Barcode Detection API**: kamera belakang dan deteksi multi-format (QR, EAN, UPC, Code 128/39, serta format lain yang tersedia di browser).
-- **QR encoder lokal**: QR identifier dibuat tanpa mengirim data ke layanan luar.
-- **Web App Manifest + Service Worker**: shell aplikasi dapat dipasang sebagai PWA dan dibuka kembali secara offline.
-- **Node HTTP/HTTPS server bawaan**: development server tanpa instalasi package.
-
-### Trade-off database MVP
-
-IndexedDB reliable dan atomik di satu browser, serta tetap berfungsi tanpa internet. Namun data **tidak otomatis tersedia di perangkat lain**, dapat hilang bila storage browser dibersihkan, dan bukan database produksi multi-user. Seluruh UI menggunakan `InventoryService` dan kontrak repository sehingga fase backend dapat mengganti `IndexedDbInventoryRepository` dengan REST repository tanpa menulis ulang alur UI. Sinkronisasi offline belum dibuat agar tidak menciptakan transaksi ganda sebelum desain idempotency/server tersedia.
+> IndexedDB mempertahankan data setelah refresh tetapi bersifat single-device. Menghapus data situs akan menghapus inventori. Repository layer dapat diganti backend kemudian tanpa mengubah seluruh UI; versi ini sengaja tidak memiliki sinkronisasi.
 
 ## Struktur
 
 ```text
-public/
-├── index.html              # entry point
-├── styles.css              # UI responsif desktop/mobile
-├── manifest.webmanifest    # instalasi PWA
-├── service-worker.js       # cache application shell
-└── src/
-    ├── app.js              # layar dan navigasi
-    ├── database.js         # IndexedDB repository + transaksi atomik
-    ├── inventory-service.js# validasi/use cases
-    ├── scanner.js          # kamera + multi-format scanner
-    └── qr.js               # QR generator lokal
-server.mjs                  # development HTTP/HTTPS server
-scripts/create-dev-cert.sh  # sertifikat HTTPS LAN untuk kamera HP
-tests/                      # unit test Node
+index.html / styles.css         entry point dan UI
+src/core/                      konstanta dan aturan stok
+src/data/                      repository IndexedDB
+src/services/                  inventory, scanner, QR, CSV
+src/ui/                        template/presentation helper
+assets/icons/                  ikon PWA
+service-worker.js              offline application shell
+tests/                         unit test Node
+server.mjs                     server HTTP/HTTPS development
 ```
 
-## Skema data
+## Menjalankan dan testing
 
-- `items`: `id`, `code` (unique), `name`, `category`, `unit`, `location`, `stock`, `minimumStock`, `photo`, `active`, `createdAt`, `updatedAt`.
-- `transactions`: `id`, `itemId`, `itemCode`, `itemName`, `type`, `quantity`, `stockBefore`, `stockAfter`, `createdAt`, `note`.
-
-Update stok dan insert transaksi dilakukan dalam **satu transaction IndexedDB read-write**. Stok negatif ditolak secara default.
-
-## Menjalankan di komputer
-
-Prasyarat: Node.js 20 atau lebih baru. Tidak perlu `npm install`.
+Node.js 20+ diperlukan. Tidak ada package yang harus di-install, tetapi `npm install` aman dijalankan.
 
 ```bash
+npm install
 npm test
+npm run check
 npm run dev
 ```
 
-Buka `http://localhost:4173`. Server bind ke `0.0.0.0` dan menampilkan URL IP LAN untuk perangkat lain.
+Buka `http://localhost:4173`. Server bind ke `0.0.0.0` dan mencetak alamat LAN.
 
-## Menguji kamera dari HP
+## Scanner di HP dan HTTPS
 
-`getUserMedia` memerlukan secure context. `localhost` aman di komputer, tetapi URL IP LAN melalui HTTP biasanya tidak diberi akses kamera. Buat sertifikat development untuk IP komputer:
+Kamera browser membutuhkan secure context. GitHub Pages sudah HTTPS. Untuk testing Wi-Fi lokal:
 
 ```bash
-./scripts/create-dev-cert.sh 192.168.1.10
+./scripts/create-dev-cert.sh 192.168.1.100
 npm run dev:https
 ```
 
-1. Ganti IP dengan alamat LAN komputer yang dicetak oleh server.
-2. Salin dan percayai `certs/dev-cert.pem` pada HP testing, atau gunakan sertifikat development dari CA lokal seperti `mkcert`.
-3. Buka `https://192.168.1.10:8443` dari HP pada Wi-Fi yang sama.
-4. Berikan izin kamera, lalu buka **Scan Stock**.
+Percayai `certs/dev-cert.pem` pada perangkat testing, lalu buka `https://192.168.1.100:8443`. Izinkan kamera dan gunakan halaman **Scan Stock**. Decoder ZXing membutuhkan koneksi saat pertama kali dimuat dari CDN; setelah termuat, browser dapat menyimpannya dalam HTTP cache. Barcode Detection fallback berbeda dukungannya antarbrowser. Chrome/Edge Android terbaru direkomendasikan; Safari/iOS harus diuji pada versi target.
 
-Barcode Detection API bergantung pada browser. Chrome/Edge Android terbaru biasanya menjadi target development paling praktis. UI selalu menyediakan input kode manual bila API scanner tidak tersedia. Untuk dukungan produksi iOS lintas versi yang konsisten, decoder WASM/ZXing perlu ditambahkan setelah akses package/vendor artifact tersedia; arsitektur `WebScanner` mengisolasi perubahan tersebut.
+Format yang diminta: QR Code, EAN-13, EAN-8, UPC-A/E, Code 128, Code 39, Codabar, ITF, Data Matrix, PDF417, dan Aztec.
 
-## Tahapan yang dapat diuji
+## GitHub Pages
 
-1. Master barang dan IndexedDB: tambah, edit, kode unik, status aktif.
-2. Scanner: barcode/QR ditemukan atau langsung masuk form **Daftarkan Barang**.
-3. QR: tampil, download SVG, cetak, dan Web Share jika tersedia.
-4. Stok: masuk/keluar, larangan negatif, transaksi atomik.
-5. Scan Stock: simpan lalu kamera otomatis aktif untuk barang berikutnya.
-6. Dashboard dan riwayat transaksi.
+Semua asset memakai path relatif agar kompatibel dengan `/barcodeQR/`. Workflow `.github/workflows/pages.yml` menguji lalu mengunggah root static project saat push ke `main`. Atur **Settings → Pages → Source: GitHub Actions**. URL produksi:
+
+`https://maleosan.github.io/barcodeQR/`
+
+README hanya dokumentasi developer; `index.html` adalah halaman aplikasi.

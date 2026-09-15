@@ -1,5 +1,5 @@
 node_modules/
-.env
-certs/*.pem
-.DS_Store
+certs/
 coverage/
+.DS_Store
+*.log

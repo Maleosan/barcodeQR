@@ -1,5 +1,5 @@
 {
-  "name": "stokqr-web",
+  "name": "stokqr",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -7,7 +7,7 @@
     "dev": "node server.mjs",
     "dev:https": "node server.mjs --https",
     "test": "node --test",
-    "check": "node --check server.mjs && node --check public/src/app.js && node --check public/src/inventory-service.js && node --check public/src/qr.js"
+    "check": "node scripts/check.mjs"
   },
   "engines": { "node": ">=20" }
 }
