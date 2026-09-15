@@ -43,24 +43,31 @@ test('kombinasi filter laporan',()=>assert.deepEqual(filterInventory(reportItems
 test('CSV laporan berisi satuan dan status AMAN MENIPIS HABIS',()=>{const csv=inventoryCsv(reportItems());assert.match(csv,/Satuan/);assert.match(csv,/AMAN/);assert.match(csv,/MENIPIS/);assert.match(csv,/HABIS/)});
 test('export Excel laporan memiliki laporan dan ringkasan',()=>assert.deepEqual(createReportWorkbook(fakeXlsx,reportItems()).SheetNames,['Laporan Stok','Ringkasan']));
 
-function scannerHarness({ startError, feedback } = {}) {
+function scannerHarness({ startError, startErrors, feedback } = {}) {
   const sessions = [];
+  const attempts = [];
+  const failures = startErrors ? [...startErrors] : startError ? [startError] : [];
   class Reader {
-    async decodeFromConstraints(_constraints, video, callback) {
-      if (startError) throw startError;
+    async decodeFromConstraints(constraints, video, callback) {
+      attempts.push(constraints);
+      if (failures.length) throw failures.shift();
+      if (!video.srcObject) video.srcObject = { getTracks: () => [video.track], getVideoTracks: () => [video.track] };
       const session = { callback, stops: 0, video, controls: null };
       session.controls = { stop: () => { session.stops += 1; } };
       sessions.push(session);
       return session.controls;
     }
   }
-  return { sessions, scanner: new BarcodeScanner({ getZXing: () => ({ BrowserMultiFormatReader: Reader }), feedback }) };
+  return { sessions, attempts, scanner: new BarcodeScanner({ getZXing: () => ({ BrowserMultiFormatReader: Reader }), getMediaDevices: () => ({ getUserMedia() {} }), getPermissions: () => undefined, feedback, logger: {} }) };
 }
 const fakeVideo = () => {
   const track = { stops: 0, stop() { this.stops += 1; } };
-  return { srcObject: { getTracks: () => [track] }, track };
+  const attributes = new Set();
+  return { srcObject: { getTracks: () => [track], getVideoTracks: () => [track] }, track, attributes, paused: false, setAttribute(name) { attributes.add(name); } };
 };
 const result = value => ({ getText: () => value, getBarcodeFormat: () => 'EAN_13' });
+
+test('kamera berhasil start dengan atribut video mobile',async()=>{const {scanner,attempts}=scannerHarness(),video=fakeVideo();await scanner.start(video,()=>{});assert.equal(scanner.state,'scanning');assert.equal(attempts.length,1);assert.equal(video.autoplay,true);assert.equal(video.muted,true);assert.equal(video.playsInline,true);assert.ok(video.attributes.has('playsinline'))});
 
 test('lifecycle scan baru, daftar, simpan, lalu barcode sama dapat dipindai lagi', async () => {
   const { scanner, sessions } = scannerHarness();
@@ -130,6 +137,22 @@ test('NotFoundException normal dan scanner tetap mencari', async () => {
   assert.deepEqual(errors, []);
 });
 
+test('ChecksumException dan FormatException adalah miss decode normal', async () => {
+  const { scanner, sessions } = scannerHarness();
+  const errors = [];
+  await scanner.start(fakeVideo(), () => {}, error => errors.push(error));
+  sessions[0].callback(undefined, { name: 'ChecksumException' });
+  sessions[0].callback(undefined, { name: 'FormatException' });
+  assert.equal(scanner.running, true);
+  assert.deepEqual(errors, []);
+});
+
+test('mediaDevices tidak tersedia menghasilkan error khusus', async () => {
+  const scanner = new BarcodeScanner({ getMediaDevices: () => undefined, getZXing: () => ({ BrowserMultiFormatReader: class {} }), logger: {} });
+  await assert.rejects(scanner.start(fakeVideo(), () => {}), /tidak mendukung akses kamera/);
+  assert.equal(scanner.state, 'error');
+});
+
 test('permission kamera ditolak menghasilkan error dan dapat dicoba ulang', async () => {
   const denied = Object.assign(new Error('denied'), { name: 'NotAllowedError' });
   const { scanner } = scannerHarness({ startError: denied });
@@ -137,14 +160,37 @@ test('permission kamera ditolak menghasilkan error dan dapat dicoba ulang', asyn
   await assert.rejects(scanner.start(fakeVideo(), () => {}, error => errors.push(error)), /Izin kamera ditolak/);
   assert.equal(scanner.state, 'error');
   assert.equal(errors[0].code, 'PERMISSION_DENIED');
-  const retry = scannerHarness();
-  await retry.scanner.start(fakeVideo(), () => {});
-  assert.equal(retry.scanner.running, true);
+  await scanner.start(fakeVideo(), () => {});
+  assert.equal(scanner.running, true);
+});
+
+test('kamera tidak tersedia mencoba fallback lalu menampilkan error khusus', async () => {
+  const unavailable = () => Object.assign(new Error('no camera'), { name: 'NotFoundError' });
+  const { scanner, attempts } = scannerHarness({ startErrors: [unavailable(), unavailable(), unavailable()] });
+  await assert.rejects(scanner.start(fakeVideo(), () => {}), /tidak tersedia di perangkat/);
+  assert.equal(attempts.length, 3);
+  assert.equal(scanner.state, 'error');
+});
+
+test('constraint kamera belakang fallback ke kamera default', async () => {
+  const constrained = Object.assign(new Error('constraint'), { name: 'OverconstrainedError' });
+  const { scanner, attempts } = scannerHarness({ startError: constrained });
+  await scanner.start(fakeVideo(), () => {});
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(attempts[0].video.facingMode, { exact: 'environment' });
+  assert.deepEqual(attempts[1].video.facingMode, { ideal: 'environment' });
+  assert.equal(scanner.running, true);
+});
+
+test('kamera yang sedang dipakai aplikasi lain memiliki pesan khusus', async () => {
+  const busy = Object.assign(new Error('busy'), { name: 'NotReadableError' });
+  const { scanner } = scannerHarness({ startError: busy });
+  await assert.rejects(scanner.start(fakeVideo(), () => {}), /digunakan aplikasi lain/);
 });
 
 test('decoder tidak tersedia tidak menampilkan scanner aktif', async () => {
-  const scanner = new BarcodeScanner({ getZXing: () => undefined });
-  await assert.rejects(scanner.start(fakeVideo(), () => {}), /Decoder barcode belum tersedia/);
+  const scanner = new BarcodeScanner({ getZXing: () => undefined, getMediaDevices: () => ({ getUserMedia() {} }), logger: {} });
+  await assert.rejects(scanner.start(fakeVideo(), () => {}), /Scanner tidak dapat dimuat/);
   assert.equal(scanner.running, false);
   assert.equal(scanner.state, 'error');
 });
