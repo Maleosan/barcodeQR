@@ -1,0 +1,15 @@
+import { normalizeItem, calculateTransaction } from './domain.js';
+const DB = 'stokqr-local'; const VERSION = 1;
+export class InventoryRepository {
+  constructor(indexedDB = globalThis.indexedDB) { this.indexedDB = indexedDB; this.dbPromise = null; }
+  open() { if (this.dbPromise) return this.dbPromise; this.dbPromise = new Promise((resolve,reject) => { const req=this.indexedDB.open(DB,VERSION); req.onerror=()=>reject(req.error); req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains('items')){const s=db.createObjectStore('items',{keyPath:'id'});s.createIndex('code','code',{unique:true});}if(!db.objectStoreNames.contains('transactions')){const s=db.createObjectStore('transactions',{keyPath:'id'});s.createIndex('createdAt','createdAt');}};req.onsuccess=()=>resolve(req.result); }); return this.dbPromise; }
+  async store(name, mode='readonly') { return (await this.open()).transaction(name,mode).objectStore(name); }
+  request(req) { return new Promise((resolve,reject)=>{req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);}); }
+  async allItems() { return this.request((await this.store('items')).getAll()); }
+  async allTransactions() { const rows=await this.request((await this.store('transactions')).getAll()); return rows.sort((a,b)=>b.createdAt.localeCompare(a.createdAt)); }
+  async findByCode(code) { return this.request((await this.store('items')).index('code').get(String(code).trim())); }
+  async getItem(id) { return this.request((await this.store('items')).get(id)); }
+  async saveItem(input) { const previous=input.id ? await this.getItem(input.id) : undefined; const item=normalizeItem(input,previous); try { await this.request((await this.store('items','readwrite')).put(item)); } catch(e) { if(e.name==='ConstraintError') throw new Error('Kode barang sudah digunakan.'); throw e; } return item; }
+  async transact(itemId,type,amount,note='') { const db=await this.open(); return new Promise((resolve,reject)=>{ const tx=db.transaction(['items','transactions'],'readwrite'); const items=tx.objectStore('items'); const get=items.get(itemId); let result; get.onerror=()=>reject(get.error); get.onsuccess=()=>{try{const item=get.result;if(!item)throw new Error('Barang tidak ditemukan.');const calc=calculateTransaction(item.stock,type,amount);item.stock=calc.after;item.updatedAt=new Date().toISOString();result={id:crypto.randomUUID(),itemId:item.id,itemName:item.name,code:item.code,type,amount:calc.amount,before:calc.before,after:calc.after,note:String(note).trim(),createdAt:new Date().toISOString()};items.put(item);tx.objectStore('transactions').put(result);}catch(e){tx.abort();reject(e);}};tx.oncomplete=()=>resolve(result);tx.onerror=()=>reject(tx.error); }); }
+  async clear() { const db=await this.open(); await Promise.all(['items','transactions'].map(n=>this.request(db.transaction(n,'readwrite').objectStore(n).clear()))); }
+}
