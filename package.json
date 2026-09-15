@@ -1,0 +1,13 @@
+{
+  "name": "stokqr-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "dev:https": "node server.mjs --https",
+    "test": "node --test",
+    "check": "node --check server.mjs && node --check public/src/app.js && node --check public/src/inventory-service.js && node --check public/src/qr.js"
+  },
+  "engines": { "node": ">=20" }
+}
