@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import { normalizeItem,nextGeneratedCode,calculateTransaction,TX,stockStatus,filterTransactions,dashboardStats,inventoryCsv,SCAN_FORMATS,cleanCode } from '../src/domain.js';import { BarcodeScanner } from '../src/scanner.js';
+import test from 'node:test';import assert from 'node:assert/strict';import { normalizeItem,nextGeneratedCode,calculateTransaction,TX,stockStatus,filterTransactions,dashboardStats,inventoryCsv,SCAN_FORMATS,cleanCode,filterInventory,inventoryReportStats } from '../src/domain.js';import { InventoryRepository } from '../src/repository.js';import { BarcodeScanner,ScanFeedback } from '../src/scanner.js';import { IMPORT_HEADERS,buildImportBatch,createReportWorkbook,createTemplateWorkbook,parseActive,validateImportHeaders,validateImportRows } from '../src/excel.js';
 const item=(over={})=>normalizeItem({code:'8991234567890',name:'Indomie',category:'Makanan',unit:'PCS',location:'A',stock:10,minimum:2,...over});
 test('tambah barang membentuk record lengkap',()=>assert.equal(item().name,'Indomie'));
 test('edit barang mempertahankan id dan createdAt',()=>{const a=item(),b=normalizeItem({...a,name:'Baru'},a);assert.equal(b.id,a.id);assert.equal(b.createdAt,a.createdAt)});
@@ -16,7 +16,34 @@ test('dashboard menghitung status',()=>{const s=dashboardStats([item(),item({cod
 test('status stok',()=>{assert.equal(stockStatus(item()),'AMAN');assert.equal(stockStatus(item({stock:2})),'MENIPIS');assert.equal(stockStatus(item({stock:0})),'HABIS')});
 test('export CSV aman dan memuat status',()=>assert.match(inventoryCsv([item({name:'Kopi, ABC'})]),/"Kopi, ABC".*AMAN/));
 
-function scannerHarness({ startError } = {}) {
+const importRow=(over={})=>({'Kode Barang':'BRG-00100','Nama Barang':'Beras','Kategori':'Bahan Pokok','Satuan':'Kg','Lokasi':'Gudang A','Stok Awal':20,'Stok Minimum':5,'Status Aktif':'Aktif','Foto':'',...over});
+test('header import lengkap diterima',()=>assert.equal(validateImportHeaders(IMPORT_HEADERS).valid,true));
+test('header import yang hilang ditolak',()=>assert.deepEqual(validateImportHeaders(IMPORT_HEADERS.slice(0,-1)).missing,['Foto']));
+test('baris import valid dinormalisasi',()=>{const v=validateImportRows([importRow()],[]);assert.equal(v.valid,1);assert.equal(v.canImport,true);assert.equal(buildImportBatch(v)[0].active,true)});
+test('nama barang kosong menjadi error',()=>assert.match(validateImportRows([importRow({'Nama Barang':' '})],[]).rows[0].messages.join(),/Nama/));
+test('kode barang kosong menjadi error',()=>assert.match(validateImportRows([importRow({'Kode Barang':''})],[]).rows[0].messages.join(),/Kode/));
+test('kode duplikat dalam file ditolak',()=>{const v=validateImportRows([importRow(),importRow()],[]);assert.equal(v.error,1);assert.equal(v.canImport,false)});
+test('stok import invalid ditolak',()=>assert.match(validateImportRows([importRow({'Stok Awal':-1})],[]).rows[0].messages.join(),/Stok awal/));
+test('minimum import invalid ditolak',()=>assert.match(validateImportRows([importRow({'Stok Minimum':'abc'})],[]).rows[0].messages.join(),/Stok minimum/));
+test('status import invalid ditolak',()=>{assert.equal(parseActive('Aktif'),true);assert.equal(parseActive('Nonaktif'),false);assert.match(validateImportRows([importRow({'Status Aktif':'mungkin'})],[]).rows[0].messages.join(),/Status/)});
+test('file tanpa data menghasilkan fatal error',()=>{const v=validateImportRows([],[]);assert.equal(v.canImport,false);assert.match(v.fatal,/tidak berisi/)});
+test('kode yang sudah ada menjadi warning dan tidak diimport',()=>{const v=validateImportRows([importRow()],[item({code:'BRG-00100'})]);assert.equal(v.warning,1);assert.equal(buildImportBatch(v).length,0)});
+test('beberapa barang valid siap diimport',()=>{const v=validateImportRows([importRow(),importRow({'Kode Barang':'BRG-00101','Nama Barang':'Gula'})],[]);assert.equal(buildImportBatch(v).length,2)});
+test('repository mengimport beberapa barang dalam satu transaksi',async()=>{const added=[],db={transaction:()=>{const tx={objectStore:()=>({add:value=>added.push(value)})};queueMicrotask(()=>tx.oncomplete?.());return tx}};const repository=new InventoryRepository(null);repository.open=async()=>db;const imported=await repository.importItems(buildImportBatch(validateImportRows([importRow(),importRow({'Kode Barang':'BRG-00101'})],[])));assert.equal(imported.length,2);assert.equal(added.length,2)});
+const fakeXlsx={utils:{aoa_to_sheet:rows=>({rows}),json_to_sheet:rows=>({rows}),book_new:()=>({SheetNames:[],Sheets:{}}),book_append_sheet:(book,sheet,name)=>{book.SheetNames.push(name);book.Sheets[name]=sheet}}};
+test('template Excel memiliki sheet data dan panduan',()=>assert.deepEqual(createTemplateWorkbook(fakeXlsx).SheetNames,['Data Barang','Panduan']));
+
+const reportItems=()=>[item({code:'1',name:'Aqua',category:'Minuman',location:'A',stock:10,minimum:2,active:true}),item({code:'2',name:'Kopi',category:'Minuman',location:'B',stock:2,minimum:2,active:true}),item({code:'3',name:'Sabun',category:'Kebersihan',location:'A',stock:0,minimum:2,active:false})];
+test('summary laporan menghitung semua status',()=>assert.deepEqual(inventoryReportStats(reportItems()),{totalItems:3,totalStock:12,safe:1,low:1,empty:1}));
+test('filter laporan kategori',()=>assert.equal(filterInventory(reportItems(),{category:'Minuman'}).length,2));
+test('filter laporan lokasi',()=>assert.equal(filterInventory(reportItems(),{location:'A'}).length,2));
+test('filter laporan status',()=>assert.equal(filterInventory(reportItems(),{status:'MENIPIS'}).length,1));
+test('pencarian laporan',()=>assert.equal(filterInventory(reportItems(),{query:'sab'}).length,1));
+test('kombinasi filter laporan',()=>assert.deepEqual(filterInventory(reportItems(),{category:'Minuman',location:'B',status:'MENIPIS',active:'active',query:'kopi'}).map(i=>i.code),['2']));
+test('CSV laporan berisi satuan dan status AMAN MENIPIS HABIS',()=>{const csv=inventoryCsv(reportItems());assert.match(csv,/Satuan/);assert.match(csv,/AMAN/);assert.match(csv,/MENIPIS/);assert.match(csv,/HABIS/)});
+test('export Excel laporan memiliki laporan dan ringkasan',()=>assert.deepEqual(createReportWorkbook(fakeXlsx,reportItems()).SheetNames,['Laporan Stok','Ringkasan']));
+
+function scannerHarness({ startError, feedback } = {}) {
   const sessions = [];
   class Reader {
     async decodeFromConstraints(_constraints, video, callback) {
@@ -27,7 +54,7 @@ function scannerHarness({ startError } = {}) {
       return session.controls;
     }
   }
-  return { sessions, scanner: new BarcodeScanner({ getZXing: () => ({ BrowserMultiFormatReader: Reader }) }) };
+  return { sessions, scanner: new BarcodeScanner({ getZXing: () => ({ BrowserMultiFormatReader: Reader }), feedback }) };
 }
 const fakeVideo = () => {
   const track = { stops: 0, stop() { this.stops += 1; } };
@@ -121,3 +148,8 @@ test('decoder tidak tersedia tidak menampilkan scanner aktif', async () => {
   assert.equal(scanner.running, false);
   assert.equal(scanner.state, 'error');
 });
+
+test('getar dipanggil satu kali saat scan berhasil',()=>{const calls=[],feedback=new ScanFeedback({vibrate:value=>calls.push(value),createAudioContext:()=>null});feedback.notify();assert.deepEqual(calls,[70])});
+test('feedback tidak error tanpa vibration API',()=>{const feedback=new ScanFeedback({vibrate:null,createAudioContext:()=>null});assert.doesNotThrow(()=>feedback.notify())});
+test('beep dan getar tidak berulang untuk callback duplikat satu sesi',async()=>{let beeps=0,vibrations=0;const audio={state:'running',currentTime:0,destination:{},createOscillator:()=>({frequency:{setValueAtTime(){}},connect(){},start(){beeps+=1},stop(){}}),createGain:()=>({gain:{setValueAtTime(){},exponentialRampToValueAtTime(){}},connect(){}})};const feedback=new ScanFeedback({vibrate:()=>{vibrations+=1},createAudioContext:()=>audio});feedback.prepare();const {scanner,sessions}=scannerHarness({feedback});await scanner.start(fakeVideo(),()=>{});sessions[0].callback(result('SAMA'));sessions[0].callback(result('SAMA'));await new Promise(resolve=>setTimeout(resolve));assert.equal(beeps,1);assert.equal(vibrations,1)});
+test('feedback aktif kembali untuk barcode sama setelah restart',async()=>{let feedbackCount=0;const feedback={prepare(){},notify(){feedbackCount+=1}};const {scanner,sessions}=scannerHarness({feedback});for(let i=0;i<2;i++){await scanner.start(fakeVideo(),()=>{});sessions.at(-1).callback(result('SAMA'));await new Promise(resolve=>setTimeout(resolve))}assert.equal(feedbackCount,2);assert.equal(scanner.state,'detected')});

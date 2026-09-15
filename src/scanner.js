@@ -16,9 +16,52 @@ export class ScannerError extends Error {
   }
 }
 
+export class ScanFeedback {
+  constructor({
+    vibrate = pattern => globalThis.navigator?.vibrate?.(pattern),
+    createAudioContext = () => {
+      const AudioContext = globalThis.AudioContext || globalThis.webkitAudioContext;
+      return AudioContext ? new AudioContext() : null;
+    }
+  } = {}) {
+    this.vibrate = vibrate;
+    this.createAudioContext = createAudioContext;
+    this.audioContext = null;
+  }
+
+  prepare() {
+    try {
+      this.audioContext ||= this.createAudioContext?.() || null;
+      if (this.audioContext?.state === 'suspended') void Promise.resolve(this.audioContext.resume()).catch(() => {});
+    } catch { this.audioContext = null; }
+  }
+
+  notify() {
+    try { this.vibrate?.(70); } catch {}
+    try {
+      const context = this.audioContext;
+      if (!context || context.state === 'closed') return;
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      const now = context.currentTime;
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(880, now);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.12, now + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.09);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(now);
+      oscillator.stop(now + 0.1);
+    } catch {}
+  }
+}
+
 export class BarcodeScanner {
-  constructor({ getZXing = () => globalThis.ZXingBrowser } = {}) {
+  constructor({ getZXing = () => globalThis.ZXingBrowser, feedback = new ScanFeedback() } = {}) {
     this.getZXing = getZXing;
+    this.feedback = feedback;
+    this.reader = null;
     this.controls = null;
     this.video = null;
     this.state = SCANNER_STATE.IDLE;
@@ -40,6 +83,8 @@ export class BarcodeScanner {
     this.listeners.forEach(listener => listener(state, detail));
   }
 
+  prepareFeedback() { this.feedback?.prepare?.(); }
+
   async start(video, onResult, onError) {
     await this.stop();
     const runId = ++this.runId;
@@ -54,7 +99,7 @@ export class BarcodeScanner {
     this.video = video;
     this.setState(SCANNER_STATE.STARTING);
     try {
-      const reader = new ZXing.BrowserMultiFormatReader();
+      const reader = this.reader ||= new ZXing.BrowserMultiFormatReader();
       const controls = await reader.decodeFromConstraints({
         audio: false,
         video: {
@@ -68,6 +113,7 @@ export class BarcodeScanner {
           const value = this.acceptDecoded(result.getText());
           if (!value) return;
           this.setState(SCANNER_STATE.DETECTED, value);
+          this.feedback?.notify?.();
           void this.stop({ preserveState: true }).then(() => onResult(value, result.getBarcodeFormat?.()));
           return;
         }
