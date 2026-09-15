@@ -41,9 +41,31 @@ export function filterTransactions(rows, period, query = '', now = new Date()) {
 }
 export function inventoryCsv(items) {
   const esc = value => `"${String(value).replaceAll('"', '""')}"`;
-  return ['Kode,Nama,Kategori,Lokasi,Stok,Minimum,Status', ...items.map(i => [i.code,i.name,i.category,i.location,i.stock,i.minimum,stockStatus(i)].map(esc).join(','))].join('\n');
+  return ['No,Kode,Nama,Kategori,Lokasi,Stok,Satuan,Minimum,Status,Aktif,Terakhir Diperbarui', ...items.map((i,index) => [index+1,i.code,i.name,i.category,i.location,i.stock,i.unit,i.minimum,stockStatus(i),i.active?'Ya':'Tidak',i.updatedAt||''].map(esc).join(','))].join('\n');
 }
 export function dashboardStats(items) {
   const active = items.filter(i => i.active);
   return { totalItems: active.length, totalStock: active.reduce((n,i)=>n+i.stock,0), low: active.filter(i=>stockStatus(i)==='MENIPIS').length, empty: active.filter(i=>stockStatus(i)==='HABIS').length };
+}
+
+export function filterInventory(items, filters = {}) {
+  const query = String(filters.query || '').trim().toLowerCase();
+  return items.filter(item => {
+    if (filters.active === 'active' && !item.active) return false;
+    if (filters.active === 'inactive' && item.active) return false;
+    if (filters.category && filters.category !== 'all' && item.category !== filters.category) return false;
+    if (filters.location && filters.location !== 'all' && item.location !== filters.location) return false;
+    if (filters.status && filters.status !== 'all' && stockStatus(item) !== filters.status) return false;
+    return !query || `${item.code} ${item.name} ${item.category} ${item.location}`.toLowerCase().includes(query);
+  });
+}
+
+export function inventoryReportStats(items) {
+  return {
+    totalItems: items.length,
+    totalStock: items.reduce((sum, item) => sum + Number(item.stock || 0), 0),
+    safe: items.filter(item => stockStatus(item) === 'AMAN').length,
+    low: items.filter(item => stockStatus(item) === 'MENIPIS').length,
+    empty: items.filter(item => stockStatus(item) === 'HABIS').length
+  };
 }
