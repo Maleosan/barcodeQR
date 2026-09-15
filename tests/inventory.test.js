@@ -1,8 +1,17 @@
-import test from 'node:test';import assert from 'node:assert/strict';import {InventoryService} from '../public/src/inventory-service.js';import {calculateStock} from '../public/src/database.js';import {createQrMatrix,qrSvg} from '../public/src/qr.js';
-class FakeRepository{constructor(){this.items=[]}async findByCode(c){return this.items.find(x=>x.code===c)}async saveItem(item){if(!item.id)item.id=this.items.length+1;this.items=this.items.filter(x=>x.id!==item.id).concat(item);return item.id}async getItem(id){return this.items.find(x=>x.id===id)}async listItems(){return this.items}async listTransactions(){return[]}}
-test('membuat barang dan menormalkan kode',async()=>{const repo=new FakeRepository(),service=new InventoryService(repo);const item=await service.save({code:' abc-123 ',name:'Aqua',unit:'Botol',category:'Minuman',location:'A1',stock:10,minimumStock:2,active:true});assert.equal(item.code,'ABC-123');assert.equal(await service.find('abc-123'),item)});
-test('kode barang duplikat ditolak',async()=>{const repo=new FakeRepository(),service=new InventoryService(repo),data={code:'ABC',name:'A',unit:'Pcs',stock:0,minimumStock:0,active:true};await service.save(data);await assert.rejects(()=>service.save({...data,name:'B'}),/sudah digunakan/)});
-test('kode QR otomatis berurutan',async()=>{const repo=new FakeRepository(),service=new InventoryService(repo);repo.items=[{id:1,code:'BRG-00009'}];assert.equal(await service.nextCode(),'BRG-00010')});
-test('stok masuk keluar dan penyesuaian benar',()=>{assert.equal(calculateStock(100,'IN',5),105);assert.equal(calculateStock(100,'OUT',5),95);assert.equal(calculateStock(100,'ADJUSTMENT',23),23)});
-test('stok negatif dan jumlah invalid ditolak',()=>{assert.throws(()=>calculateStock(2,'OUT',3),/negatif/);assert.throws(()=>calculateStock(2,'IN',0),/lebih dari 0/)});
-test('QR identifier menghasilkan matrix dan SVG',()=>{const matrix=createQrMatrix('BRG-00001');assert.equal(matrix.length,21);assert.ok(matrix.flat().some(Boolean));assert.match(qrSvg('BRG-00001'),/<svg/)});
+import test from 'node:test';import assert from 'node:assert/strict';import { normalizeItem,nextGeneratedCode,calculateTransaction,TX,stockStatus,filterTransactions,dashboardStats,inventoryCsv,SCAN_FORMATS,cleanCode } from '../src/domain.js';import { BarcodeScanner } from '../src/scanner.js';
+const item=(over={})=>normalizeItem({code:'8991234567890',name:'Indomie',category:'Makanan',unit:'PCS',location:'A',stock:10,minimum:2,...over});
+test('tambah barang membentuk record lengkap',()=>assert.equal(item().name,'Indomie'));
+test('edit barang mempertahankan id dan createdAt',()=>{const a=item(),b=normalizeItem({...a,name:'Baru'},a);assert.equal(b.id,a.id);assert.equal(b.createdAt,a.createdAt)});
+test('kode kosong ditolak dan duplikat didukung index unik repository',()=>assert.throws(()=>item({code:''}),/wajib/));
+test('generate QR menghasilkan kode berurutan dan payload hanya kode',()=>assert.equal(nextGeneratedCode([{code:'BRG-00009'}]),'BRG-00010'));
+for(const [label,format,value] of [['QR','QR_CODE','BRG-00001'],['EAN-13','EAN_13','8991234567890'],['EAN-8','EAN_8','12345670'],['UPC','UPC_A','012345678905'],['Code 128','CODE_128','ABC-128'],['Code 39','CODE_39','CODE39']])test(`scan ${label}`,()=>{assert.ok(SCAN_FORMATS.includes(format));assert.equal(new BarcodeScanner().acceptDecoded(` ${value} `),value)});
+test('barang tidak ditemukan direpresentasikan undefined',()=>assert.equal([item()].find(i=>i.code===cleanCode('000')),undefined));
+test('daftarkan barang dari scan mengisi kode',()=>assert.equal(item({code:cleanCode(' 123 ')}).code,'123'));
+test('tambah stok konsisten',()=>assert.deepEqual(calculateTransaction(10,TX.IN,5),{before:10,after:15,amount:5}));
+test('kurangi stok konsisten',()=>assert.equal(calculateTransaction(10,TX.OUT,4).after,6));
+test('stok negatif ditolak',()=>assert.throws(()=>calculateTransaction(5,TX.OUT,10),/tidak mencukupi/));
+test('penyesuaian menyimpan selisih',()=>assert.equal(calculateTransaction(8,TX.ADJUST,3).amount,-5));
+test('riwayat dapat dicari dan difilter',()=>{const now=new Date(),rows=[{itemName:'Indomie',code:'899',createdAt:now.toISOString()}];assert.equal(filterTransactions(rows,'today','indo',now).length,1)});
+test('dashboard menghitung status',()=>{const s=dashboardStats([item(),item({code:'2',stock:2}),item({code:'3',stock:0})]);assert.deepEqual(s,{totalItems:3,totalStock:12,low:1,empty:1})});
+test('status stok',()=>{assert.equal(stockStatus(item()),'AMAN');assert.equal(stockStatus(item({stock:2})),'MENIPIS');assert.equal(stockStatus(item({stock:0})),'HABIS')});
+test('export CSV aman dan memuat status',()=>assert.match(inventoryCsv([item({name:'Kopi, ABC'})]),/"Kopi, ABC".*AMAN/));
