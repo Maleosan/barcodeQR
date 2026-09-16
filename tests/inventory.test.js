@@ -147,6 +147,21 @@ test('ChecksumException dan FormatException adalah miss decode normal', async ()
   assert.deepEqual(errors, []);
 });
 
+test('pesan No MultiFormat Readers adalah miss frame normal dan scan berikutnya tetap berhasil', async () => {
+  const { scanner, sessions } = scannerHarness();
+  const errors = [];
+  const values = [];
+  await scanner.start(fakeVideo(), value => values.push(value), error => errors.push(error));
+  sessions[0].callback(undefined, new Error('No MultiFormat Readers were able to detect the code.'));
+  assert.equal(scanner.running, true);
+  assert.equal(sessions[0].stops, 0);
+  assert.deepEqual(errors, []);
+  sessions[0].callback(result('8990000000001'));
+  await new Promise(resolve => setTimeout(resolve));
+  assert.deepEqual(values, ['8990000000001']);
+  assert.equal(scanner.state, 'detected');
+});
+
 test('mediaDevices tidak tersedia menghasilkan error khusus', async () => {
   const scanner = new BarcodeScanner({ getMediaDevices: () => undefined, getZXing: () => ({ BrowserMultiFormatReader: class {} }), logger: {} });
   await assert.rejects(scanner.start(fakeVideo(), () => {}), /tidak mendukung akses kamera/);

@@ -1,4 +1,4 @@
-const CACHE = 'stokqr-v3';
+const CACHE = 'stokqr-v4';
 const BASE = new URL('./', self.location).pathname;
 const ASSETS = [
   BASE,
