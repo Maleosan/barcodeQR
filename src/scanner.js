@@ -8,6 +8,48 @@ export const SCANNER_STATE = Object.freeze({
   ERROR: 'error'
 });
 
+export const DEFAULT_SCANNER_SETTINGS = Object.freeze({
+  focusMode: 'continuous',
+  zoom: 1,
+  torch: false,
+  scanMode: 'fast',
+  autoNext: true,
+  sound: true,
+  vibration: true
+});
+
+export const SCAN_RESUME_DELAYS = Object.freeze({ fast: 250, normal: 700, stable: 1200 });
+
+export function normalizeScannerSettings(value = {}) {
+  const focusMode = ['auto', 'continuous', 'fixed'].includes(value.focusMode) ? value.focusMode : DEFAULT_SCANNER_SETTINGS.focusMode;
+  const scanMode = ['normal', 'fast', 'stable'].includes(value.scanMode) ? value.scanMode : DEFAULT_SCANNER_SETTINGS.scanMode;
+  const zoom = Number(value.zoom);
+  return {
+    focusMode,
+    zoom: Number.isFinite(zoom) && zoom > 0 ? zoom : DEFAULT_SCANNER_SETTINGS.zoom,
+    torch: value.torch === true,
+    scanMode,
+    autoNext: value.autoNext !== false,
+    sound: value.sound !== false,
+    vibration: value.vibration !== false
+  };
+}
+
+export function scannerResumeDelay(mode) { return SCAN_RESUME_DELAYS[mode] ?? SCAN_RESUME_DELAYS.normal; }
+
+export class ScannerSettingsStore {
+  constructor(storage = globalThis.localStorage, key = 'stokqr-scanner-settings') { this.storage = storage; this.key = key; }
+  load() {
+    try { return normalizeScannerSettings(JSON.parse(this.storage?.getItem?.(this.key) || '{}')); }
+    catch { return normalizeScannerSettings(); }
+  }
+  save(value) {
+    const settings = normalizeScannerSettings(value);
+    try { this.storage?.setItem?.(this.key, JSON.stringify(settings)); } catch {}
+    return settings;
+  }
+}
+
 export class ScannerError extends Error {
   constructor(code, message, cause) {
     super(message, { cause });
@@ -36,8 +78,9 @@ export class ScanFeedback {
     } catch { this.audioContext = null; }
   }
 
-  notify() {
-    try { this.vibrate?.(70); } catch {}
+  notify({ vibration = true, sound = true } = {}) {
+    if (vibration) try { this.vibrate?.(70); } catch {}
+    if (!sound) return;
     try {
       const context = this.audioContext;
       if (!context || context.state === 'closed') return;
@@ -63,12 +106,34 @@ const RECOVERABLE_DECODE_MESSAGES = [
   /No barcode or QR code detected/i
 ];
 const CAMERA_CONSTRAINTS = Object.freeze([
-  { audio: false, video: { facingMode: { exact: 'environment' } } },
-  { audio: false, video: { facingMode: { ideal: 'environment' } } },
-  { audio: false, video: true }
+  { audio: false, video: { facingMode: { exact: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
+  { audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
+  { audio: false, video: { width: { ideal: 1280 }, height: { ideal: 720 } } }
 ]);
 
 const errorName = error => String(error?.name || error?.constructor?.name || 'Error');
+
+const focusModes = capabilities => Array.isArray(capabilities?.focusMode) ? capabilities.focusMode.map(String) : [];
+const fixedFocusValue = modes => ['manual', 'fixed', 'macro'].find(mode => modes.includes(mode));
+const autoFocusValue = modes => ['auto', 'single-shot'].find(mode => modes.includes(mode));
+
+export function cameraCapabilityProfile(capabilities = {}) {
+  const modes = focusModes(capabilities);
+  const zoom = capabilities.zoom && Number.isFinite(Number(capabilities.zoom.min)) && Number.isFinite(Number(capabilities.zoom.max)) ? {
+    min: Number(capabilities.zoom.min), max: Number(capabilities.zoom.max), step: Math.max(Number(capabilities.zoom.step) || 0.1, 0.1)
+  } : null;
+  return {
+    raw: capabilities,
+    focusModes: modes,
+    focus: {
+      auto: Boolean(autoFocusValue(modes)),
+      continuous: modes.includes('continuous'),
+      fixed: Boolean(fixedFocusValue(modes))
+    },
+    zoom,
+    torch: capabilities.torch === true
+  };
+}
 
 export class BarcodeScanner {
   constructor({
@@ -89,6 +154,9 @@ export class BarcodeScanner {
     this.state = SCANNER_STATE.IDLE;
     this.runId = 0;
     this.listeners = new Set();
+    this.cameraCapabilities = cameraCapabilityProfile();
+    this.appliedCameraSettings = normalizeScannerSettings();
+    this.feedbackOptions = { sound: true, vibration: true };
   }
 
   get supportedFormats() { return SCAN_FORMATS; }
@@ -112,6 +180,49 @@ export class BarcodeScanner {
   }
 
   prepareFeedback() { this.feedback?.prepare?.(); }
+  setFeedbackOptions(options = {}) { this.feedbackOptions = { ...this.feedbackOptions, sound: options.sound !== false, vibration: options.vibration !== false }; }
+
+  cameraTrack() { return this.video?.srcObject?.getVideoTracks?.()[0] || null; }
+
+  readCameraCapabilities() {
+    try { return cameraCapabilityProfile(this.cameraTrack()?.getCapabilities?.() || {}); }
+    catch (error) { this.log('debug', 'camera capabilities unavailable', errorName(error)); return cameraCapabilityProfile(); }
+  }
+
+  resolveFocusMode(requested, profile = this.cameraCapabilities) {
+    const modes = profile.focusModes;
+    if (requested === 'continuous' && profile.focus.continuous) return 'continuous';
+    if (requested === 'auto' && profile.focus.auto) return autoFocusValue(modes);
+    if (requested === 'fixed' && profile.focus.fixed) return fixedFocusValue(modes);
+    if (profile.focus.continuous) return 'continuous';
+    return autoFocusValue(modes) || fixedFocusValue(modes) || null;
+  }
+
+  async applyTrackConstraint(name, value) {
+    const track = this.cameraTrack();
+    if (!track?.applyConstraints || value === null || value === undefined) return false;
+    try {
+      await track.applyConstraints({ advanced: [{ [name]: value }] });
+      this.log('info', `camera ${name} applied`, value);
+      return true;
+    } catch (error) {
+      this.log('warn', `camera ${name} unavailable`, { value, name: errorName(error) });
+      return false;
+    }
+  }
+
+  async configureCamera(value = {}) {
+    const requested = normalizeScannerSettings(value);
+    const profile = this.cameraCapabilities = this.readCameraCapabilities();
+    const focusMode = this.resolveFocusMode(requested.focusMode, profile);
+    const zoom = profile.zoom ? Math.min(profile.zoom.max, Math.max(profile.zoom.min, requested.zoom)) : 1;
+    const torch = profile.torch && requested.torch;
+    if (focusMode) await this.applyTrackConstraint('focusMode', focusMode);
+    if (profile.zoom) await this.applyTrackConstraint('zoom', zoom);
+    if (profile.torch) await this.applyTrackConstraint('torch', torch);
+    this.appliedCameraSettings = { ...requested, focusMode: focusMode || 'unavailable', zoom, torch };
+    return { capabilities: profile, settings: this.appliedCameraSettings };
+  }
 
   prepareVideo(video) {
     if (!video) throw new ScannerError('VIDEO_ELEMENT_MISSING', 'Tampilan kamera tidak tersedia. Muat ulang halaman.');
@@ -146,7 +257,7 @@ export class BarcodeScanner {
     return ['OverconstrainedError', 'ConstraintNotSatisfiedError', 'NotFoundError', 'DevicesNotFoundError', 'TypeError'].includes(errorName(error));
   }
 
-  async start(video, onResult, onError) {
+  async start(video, onResult, onError, options = {}) {
     await this.stop();
     const runId = ++this.runId;
     this.log('info', 'start', { runId });
@@ -172,6 +283,8 @@ export class BarcodeScanner {
 
     this.prepareVideo(video);
     this.video = video;
+    const requestedSettings = normalizeScannerSettings(options.settings);
+    this.setFeedbackOptions(requestedSettings);
     this.setState(SCANNER_STATE.STARTING);
     void this.inspectPermission(runId);
 
@@ -185,7 +298,7 @@ export class BarcodeScanner {
           const value = this.acceptDecoded(result.getText());
           if (!value) return;
           this.setState(SCANNER_STATE.DETECTED, value);
-          this.feedback?.notify?.();
+          this.feedback?.notify?.(this.feedbackOptions);
           void this.stop({ preserveState: true }).then(() => onResult?.(value, result.getBarcodeFormat?.()));
           return;
         }
@@ -228,7 +341,9 @@ export class BarcodeScanner {
       this.controls = controls;
       const stream = video.srcObject;
       this.log('info', 'camera stream acquired', { tracks: stream?.getVideoTracks?.().length ?? stream?.getTracks?.().length ?? 0 });
-      this.setState(SCANNER_STATE.SCANNING);
+      const cameraDetail = await this.configureCamera(requestedSettings);
+      if (runId !== this.runId) return false;
+      this.setState(SCANNER_STATE.SCANNING, cameraDetail);
       this.log('info', 'decode started', { runId });
       if (video.paused) void Promise.resolve(video.play?.()).catch(error => this.log('warn', 'video play deferred', errorName(error)));
       return true;
@@ -251,8 +366,11 @@ export class BarcodeScanner {
     if (['NotReadableError', 'TrackStartError', 'AbortError'].includes(name)) {
       return new ScannerError('CAMERA_BUSY', 'Kamera sedang digunakan aplikasi lain.', cause);
     }
-    if (['NotFoundError', 'DevicesNotFoundError', 'OverconstrainedError', 'ConstraintNotSatisfiedError'].includes(name)) {
+    if (['NotFoundError', 'DevicesNotFoundError'].includes(name)) {
       return new ScannerError('CAMERA_UNAVAILABLE', 'Kamera tidak tersedia di perangkat ini.', cause);
+    }
+    if (['OverconstrainedError', 'ConstraintNotSatisfiedError'].includes(name)) {
+      return new ScannerError('CONSTRAINT_UNSUPPORTED', 'Pengaturan kamera tidak didukung perangkat ini. Gunakan pengaturan default lalu coba lagi.', cause);
     }
     if (['NotSupportedError', 'TypeError'].includes(name)) {
       return new ScannerError('MEDIA_API_UNSUPPORTED', 'Browser ini tidak mendukung akses kamera.', cause);
@@ -278,6 +396,7 @@ export class BarcodeScanner {
     this.video = null;
     try { controls?.stop?.(); } catch (error) { this.log('warn', 'controls stop failed', errorName(error)); }
     this.cleanupVideoStream(video);
+    if (!preserveState) this.cameraCapabilities = cameraCapabilityProfile();
     if (!preserveState) this.setState(SCANNER_STATE.IDLE);
   }
 

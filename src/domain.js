@@ -39,9 +39,36 @@ export function filterTransactions(rows, period, query = '', now = new Date()) {
   if (period === 'month') { start.setDate(1); start.setHours(0, 0, 0, 0); }
   return rows.filter(row => (!q || `${row.itemName} ${row.code}`.toLowerCase().includes(q)) && (period === 'all' || new Date(row.createdAt) >= start));
 }
+export function filterTransactionReport(rows, filters = {}, now = new Date()) {
+  const query = String(filters.query || '').trim().toLowerCase();
+  let start = null; let end = null;
+  if (filters.period === 'today') { start = new Date(now); start.setHours(0, 0, 0, 0); }
+  if (filters.period === '7days') { start = new Date(now); start.setHours(0, 0, 0, 0); start.setDate(start.getDate() - 6); }
+  if (filters.period === 'month') { start = new Date(now); start.setDate(1); start.setHours(0, 0, 0, 0); }
+  if (filters.period === 'custom') {
+    if (filters.startDate) start = new Date(`${filters.startDate}T00:00:00`);
+    if (filters.endDate) { end = new Date(`${filters.endDate}T23:59:59.999`); }
+  }
+  return rows.filter(row => {
+    const createdAt = new Date(row.createdAt);
+    if (start && createdAt < start) return false;
+    if (end && createdAt > end) return false;
+    if (filters.type && filters.type !== 'all' && row.type !== filters.type) return false;
+    if (filters.category && filters.category !== 'all' && row.category !== filters.category) return false;
+    if (filters.location && filters.location !== 'all' && row.location !== filters.location) return false;
+    return !query || `${row.itemName} ${row.code} ${row.category || ''} ${row.note || ''}`.toLowerCase().includes(query);
+  });
+}
 export function inventoryCsv(items) {
   const esc = value => `"${String(value).replaceAll('"', '""')}"`;
-  return ['No,Kode,Nama,Kategori,Lokasi,Stok,Satuan,Minimum,Status,Aktif,Terakhir Diperbarui', ...items.map((i,index) => [index+1,i.code,i.name,i.category,i.location,i.stock,i.unit,i.minimum,stockStatus(i),i.active?'Ya':'Tidak',i.updatedAt||''].map(esc).join(','))].join('\n');
+  return ['No,Kode,Barcode,Nama,Kategori,Lokasi,Stok,Satuan,Minimum,Status,Aktif,Terakhir Diperbarui', ...items.map((i,index) => [index+1,i.code,i.barcode||i.code,i.name,i.category,i.location,i.stock,i.unit,i.minimum,stockStatus(i),i.active?'Ya':'Tidak',i.updatedAt||''].map(esc).join(','))].join('\n');
+}
+export function transactionCsv(rows) {
+  const esc = value => `"${String(value ?? '').replaceAll('"', '""')}"`;
+  return ['No,Tanggal,Jam,Kode,Nama Barang,Kategori,Jenis Transaksi,Jumlah,Stok Sebelum,Stok Sesudah,User,Catatan,Lokasi', ...rows.map((row,index) => {
+    const timestamp = new Date(row.createdAt);
+    return [index+1,timestamp.toLocaleDateString('id-ID'),timestamp.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}),row.code,row.itemName,row.category||'-',row.type,row.amount,row.before,row.after,row.user||'-',row.note||'-',row.location||'-'].map(esc).join(',');
+  })].join('\n');
 }
 export function dashboardStats(items) {
   const active = items.filter(i => i.active);
@@ -56,7 +83,7 @@ export function filterInventory(items, filters = {}) {
     if (filters.category && filters.category !== 'all' && item.category !== filters.category) return false;
     if (filters.location && filters.location !== 'all' && item.location !== filters.location) return false;
     if (filters.status && filters.status !== 'all' && stockStatus(item) !== filters.status) return false;
-    return !query || `${item.code} ${item.name} ${item.category} ${item.location}`.toLowerCase().includes(query);
+    return !query || `${item.code} ${item.barcode || ''} ${item.name} ${item.category} ${item.location}`.toLowerCase().includes(query);
   });
 }
 

@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import { normalizeItem,nextGeneratedCode,calculateTransaction,TX,stockStatus,filterTransactions,dashboardStats,inventoryCsv,SCAN_FORMATS,cleanCode,filterInventory,inventoryReportStats } from '../src/domain.js';import { InventoryRepository } from '../src/repository.js';import { BarcodeScanner,ScanFeedback } from '../src/scanner.js';import { IMPORT_HEADERS,buildImportBatch,createReportWorkbook,createTemplateWorkbook,parseActive,validateImportHeaders,validateImportRows } from '../src/excel.js';
+import test from 'node:test';import assert from 'node:assert/strict';import { normalizeItem,nextGeneratedCode,calculateTransaction,TX,stockStatus,filterTransactions,filterTransactionReport,dashboardStats,inventoryCsv,transactionCsv,SCAN_FORMATS,cleanCode,filterInventory,inventoryReportStats } from '../src/domain.js';import { InventoryRepository } from '../src/repository.js';import { BarcodeScanner,ScanFeedback,ScannerSettingsStore,cameraCapabilityProfile,normalizeScannerSettings,scannerResumeDelay } from '../src/scanner.js';import { IMPORT_HEADERS,REQUIRED_IMPORT_HEADERS,buildImportBatch,createMutationWorkbook,createReportWorkbook,createTemplateWorkbook,parseActive,validateImportHeaders,validateImportRows } from '../src/excel.js';
 const item=(over={})=>normalizeItem({code:'8991234567890',name:'Indomie',category:'Makanan',unit:'PCS',location:'A',stock:10,minimum:2,...over});
 test('tambah barang membentuk record lengkap',()=>assert.equal(item().name,'Indomie'));
 test('edit barang mempertahankan id dan createdAt',()=>{const a=item(),b=normalizeItem({...a,name:'Baru'},a);assert.equal(b.id,a.id);assert.equal(b.createdAt,a.createdAt)});
@@ -18,8 +18,10 @@ test('export CSV aman dan memuat status',()=>assert.match(inventoryCsv([item({na
 
 const importRow=(over={})=>({'Kode Barang':'BRG-00100','Nama Barang':'Beras','Kategori':'Bahan Pokok','Satuan':'Kg','Lokasi':'Gudang A','Stok Awal':20,'Stok Minimum':5,'Status Aktif':'Aktif','Foto':'',...over});
 test('header import lengkap diterima',()=>assert.equal(validateImportHeaders(IMPORT_HEADERS).valid,true));
-test('header import yang hilang ditolak',()=>assert.deepEqual(validateImportHeaders(IMPORT_HEADERS.slice(0,-1)).missing,['Foto']));
+test('header import wajib yang hilang ditolak',()=>assert.deepEqual(validateImportHeaders(IMPORT_HEADERS.filter(header=>header!=='Kode Barang')).missing,['Kode Barang']));
+test('header import opsional boleh tidak tersedia',()=>assert.equal(validateImportHeaders(REQUIRED_IMPORT_HEADERS).valid,true));
 test('baris import valid dinormalisasi',()=>{const v=validateImportRows([importRow()],[]);assert.equal(v.valid,1);assert.equal(v.canImport,true);assert.equal(buildImportBatch(v)[0].active,true)});
+test('kolom import opsional kosong memakai nilai default',()=>{const v=validateImportRows([{'Kode Barang':'BRG-2','Nama Barang':'Gula','Stok Awal':4}],[]),row=buildImportBatch(v)[0];assert.equal(row.minimum,0);assert.equal(row.active,true)});
 test('nama barang kosong menjadi error',()=>assert.match(validateImportRows([importRow({'Nama Barang':' '})],[]).rows[0].messages.join(),/Nama/));
 test('kode barang kosong menjadi error',()=>assert.match(validateImportRows([importRow({'Kode Barang':''})],[]).rows[0].messages.join(),/Kode/));
 test('kode duplikat dalam file ditolak',()=>{const v=validateImportRows([importRow(),importRow()],[]);assert.equal(v.error,1);assert.equal(v.canImport,false)});
@@ -41,7 +43,12 @@ test('filter laporan status',()=>assert.equal(filterInventory(reportItems(),{sta
 test('pencarian laporan',()=>assert.equal(filterInventory(reportItems(),{query:'sab'}).length,1));
 test('kombinasi filter laporan',()=>assert.deepEqual(filterInventory(reportItems(),{category:'Minuman',location:'B',status:'MENIPIS',active:'active',query:'kopi'}).map(i=>i.code),['2']));
 test('CSV laporan berisi satuan dan status AMAN MENIPIS HABIS',()=>{const csv=inventoryCsv(reportItems());assert.match(csv,/Satuan/);assert.match(csv,/AMAN/);assert.match(csv,/MENIPIS/);assert.match(csv,/HABIS/)});
+test('CSV laporan stok memuat kolom barcode',()=>assert.match(inventoryCsv(reportItems()),/^No,Kode,Barcode/));
 test('export Excel laporan memiliki laporan dan ringkasan',()=>assert.deepEqual(createReportWorkbook(fakeXlsx,reportItems()).SheetNames,['Laporan Stok','Ringkasan']));
+const mutationRows=()=>[{code:'1',itemName:'Aqua',category:'Minuman',location:'A',type:TX.IN,amount:5,before:5,after:10,user:'-',note:'Scan',createdAt:'2026-09-16T08:00:00.000Z'},{code:'2',itemName:'Kopi',category:'Minuman',location:'B',type:TX.OUT,amount:2,before:4,after:2,user:'-',note:'Kasir',createdAt:'2026-09-10T08:00:00.000Z'}];
+test('filter laporan mutasi mendukung custom tanggal jenis kategori lokasi dan pencarian',()=>{const rows=filterTransactionReport(mutationRows(),{period:'custom',startDate:'2026-09-15',endDate:'2026-09-16',type:TX.IN,category:'Minuman',location:'A',query:'aqua'},new Date('2026-09-16T12:00:00Z'));assert.deepEqual(rows.map(row=>row.code),['1'])});
+test('CSV mutasi memuat stok sebelum sesudah user dan catatan',()=>{const csv=transactionCsv(mutationRows());assert.match(csv,/Stok Sebelum,Stok Sesudah,User,Catatan/);assert.match(csv,/Scan/)});
+test('export Excel mutasi memiliki laporan dan ringkasan',()=>assert.deepEqual(createMutationWorkbook(fakeXlsx,mutationRows()).SheetNames,['Mutasi Stok','Ringkasan']));
 
 function scannerHarness({ startError, startErrors, feedback } = {}) {
   const sessions = [];
@@ -60,14 +67,22 @@ function scannerHarness({ startError, startErrors, feedback } = {}) {
   }
   return { sessions, attempts, scanner: new BarcodeScanner({ getZXing: () => ({ BrowserMultiFormatReader: Reader }), getMediaDevices: () => ({ getUserMedia() {} }), getPermissions: () => undefined, feedback, logger: {} }) };
 }
-const fakeVideo = () => {
-  const track = { stops: 0, stop() { this.stops += 1; } };
+const fakeVideo = ({ capabilities = {}, applyError = null } = {}) => {
+  const track = { stops: 0, applied: [], stop() { this.stops += 1; }, getCapabilities() { return capabilities; }, async applyConstraints(value) { if (applyError) throw applyError; this.applied.push(value); } };
   const attributes = new Set();
   return { srcObject: { getTracks: () => [track], getVideoTracks: () => [track] }, track, attributes, paused: false, setAttribute(name) { attributes.add(name); } };
 };
 const result = value => ({ getText: () => value, getBarcodeFormat: () => 'EAN_13' });
 
 test('kamera berhasil start dengan atribut video mobile',async()=>{const {scanner,attempts}=scannerHarness(),video=fakeVideo();await scanner.start(video,()=>{});assert.equal(scanner.state,'scanning');assert.equal(attempts.length,1);assert.equal(video.autoplay,true);assert.equal(video.muted,true);assert.equal(video.playsInline,true);assert.ok(video.attributes.has('playsinline'))});
+
+test('scanner settings disimpan dan dinormalisasi tanpa data sensitif',()=>{const memory=new Map(),storage={getItem:key=>memory.get(key),setItem:(key,value)=>memory.set(key,value)},store=new ScannerSettingsStore(storage);const saved=store.save({focusMode:'fixed',zoom:2,torch:true,scanMode:'stable',autoNext:false,sound:false,vibration:false,secret:'abaikan'});assert.deepEqual(store.load(),saved);assert.equal('secret'in saved,false)});
+test('mode scan cepat memiliki jeda auto-next paling pendek',()=>{assert.ok(scannerResumeDelay('fast')<scannerResumeDelay('normal'));assert.ok(scannerResumeDelay('normal')<scannerResumeDelay('stable'));assert.equal(normalizeScannerSettings({scanMode:'invalid'}).scanMode,'fast')});
+test('capability kamera mendeteksi focus zoom dan torch',()=>{const profile=cameraCapabilityProfile({focusMode:['single-shot','continuous','manual'],zoom:{min:1,max:4,step:.5},torch:true});assert.deepEqual(profile.focus,{auto:true,continuous:true,fixed:true});assert.deepEqual(profile.zoom,{min:1,max:4,step:.5});assert.equal(profile.torch,true)});
+test('focus yang tidak didukung fallback aman ke continuous',async()=>{const {scanner}=scannerHarness(),video=fakeVideo({capabilities:{focusMode:['continuous']}});await scanner.start(video,()=>{},()=>{},{settings:{focusMode:'fixed'}});assert.equal(scanner.appliedCameraSettings.focusMode,'continuous');assert.deepEqual(video.track.applied[0],{advanced:[{focusMode:'continuous'}]})});
+test('zoom dan torch hanya diterapkan saat capability tersedia',async()=>{const {scanner}=scannerHarness(),video=fakeVideo({capabilities:{zoom:{min:1,max:3,step:.5},torch:true}});await scanner.start(video,()=>{},()=>{},{settings:{zoom:9,torch:true}});assert.equal(scanner.appliedCameraSettings.zoom,3);assert.equal(scanner.appliedCameraSettings.torch,true);assert.deepEqual(video.track.applied.map(value=>value.advanced[0]),[{zoom:3},{torch:true}])});
+test('camera capability tidak tersedia tidak menyebabkan scanner gagal',async()=>{const {scanner}=scannerHarness(),video=fakeVideo();await scanner.start(video,()=>{},()=>{},{settings:{focusMode:'continuous',zoom:2,torch:true}});assert.equal(scanner.running,true);assert.equal(video.track.applied.length,0);assert.equal(scanner.appliedCameraSettings.focusMode,'unavailable')});
+test('kegagalan applyConstraints tidak menghentikan decode',async()=>{const {scanner}=scannerHarness(),video=fakeVideo({capabilities:{focusMode:['continuous']},applyError:Object.assign(new Error('unsupported'),{name:'OverconstrainedError'})});await scanner.start(video,()=>{});assert.equal(scanner.running,true)});
 
 test('lifecycle scan baru, daftar, simpan, lalu barcode sama dapat dipindai lagi', async () => {
   const { scanner, sessions } = scannerHarness();
@@ -197,6 +212,13 @@ test('constraint kamera belakang fallback ke kamera default', async () => {
   assert.equal(scanner.running, true);
 });
 
+test('constraint yang tetap tidak didukung memiliki solusi khusus', async () => {
+  const unsupported = () => Object.assign(new Error('constraint'), { name: 'OverconstrainedError' });
+  const { scanner } = scannerHarness({ startErrors: [unsupported(), unsupported(), unsupported()] });
+  await assert.rejects(scanner.start(fakeVideo(), () => {}), /pengaturan default/i);
+  assert.equal(scanner.state, 'error');
+});
+
 test('kamera yang sedang dipakai aplikasi lain memiliki pesan khusus', async () => {
   const busy = Object.assign(new Error('busy'), { name: 'NotReadableError' });
   const { scanner } = scannerHarness({ startError: busy });
@@ -212,5 +234,6 @@ test('decoder tidak tersedia tidak menampilkan scanner aktif', async () => {
 
 test('getar dipanggil satu kali saat scan berhasil',()=>{const calls=[],feedback=new ScanFeedback({vibrate:value=>calls.push(value),createAudioContext:()=>null});feedback.notify();assert.deepEqual(calls,[70])});
 test('feedback tidak error tanpa vibration API',()=>{const feedback=new ScanFeedback({vibrate:null,createAudioContext:()=>null});assert.doesNotThrow(()=>feedback.notify())});
+test('setting suara dan getar dapat dinonaktifkan',()=>{let vibrations=0,beeps=0;const audio={state:'running',currentTime:0,destination:{},createOscillator:()=>({frequency:{setValueAtTime(){}},connect(){},start(){beeps+=1},stop(){}}),createGain:()=>({gain:{setValueAtTime(){},exponentialRampToValueAtTime(){}},connect(){}})};const feedback=new ScanFeedback({vibrate:()=>{vibrations+=1},createAudioContext:()=>audio});feedback.prepare();feedback.notify({sound:false,vibration:false});assert.equal(vibrations,0);assert.equal(beeps,0)});
 test('beep dan getar tidak berulang untuk callback duplikat satu sesi',async()=>{let beeps=0,vibrations=0;const audio={state:'running',currentTime:0,destination:{},createOscillator:()=>({frequency:{setValueAtTime(){}},connect(){},start(){beeps+=1},stop(){}}),createGain:()=>({gain:{setValueAtTime(){},exponentialRampToValueAtTime(){}},connect(){}})};const feedback=new ScanFeedback({vibrate:()=>{vibrations+=1},createAudioContext:()=>audio});feedback.prepare();const {scanner,sessions}=scannerHarness({feedback});await scanner.start(fakeVideo(),()=>{});sessions[0].callback(result('SAMA'));sessions[0].callback(result('SAMA'));await new Promise(resolve=>setTimeout(resolve));assert.equal(beeps,1);assert.equal(vibrations,1)});
 test('feedback aktif kembali untuk barcode sama setelah restart',async()=>{let feedbackCount=0;const feedback={prepare(){},notify(){feedbackCount+=1}};const {scanner,sessions}=scannerHarness({feedback});for(let i=0;i<2;i++){await scanner.start(fakeVideo(),()=>{});sessions.at(-1).callback(result('SAMA'));await new Promise(resolve=>setTimeout(resolve))}assert.equal(feedbackCount,2);assert.equal(scanner.state,'detected')});

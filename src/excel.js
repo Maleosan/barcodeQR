@@ -1,11 +1,13 @@
 import { cleanCode, inventoryReportStats, stockStatus } from './domain.js';
 
 export const IMPORT_HEADERS = Object.freeze(['Kode Barang','Nama Barang','Kategori','Satuan','Lokasi','Stok Awal','Stok Minimum','Status Aktif','Foto']);
+export const REQUIRED_IMPORT_HEADERS = Object.freeze(['Kode Barang','Nama Barang','Stok Awal']);
+export const OPTIONAL_IMPORT_HEADERS = Object.freeze(IMPORT_HEADERS.filter(header => !REQUIRED_IMPORT_HEADERS.includes(header)));
 const MAX_IMPORT_ROWS = 5000;
 
 export function validateImportHeaders(headers = []) {
   const normalized = headers.map(value => String(value ?? '').trim());
-  const missing = IMPORT_HEADERS.filter(header => !normalized.includes(header));
+  const missing = REQUIRED_IMPORT_HEADERS.filter(header => !normalized.includes(header));
   const unexpected = normalized.filter(header => header && !IMPORT_HEADERS.includes(header));
   return { valid: missing.length === 0, missing, unexpected };
 }
@@ -36,8 +38,8 @@ export function validateImportRows(sourceRows = [], existingItems = []) {
     const code = cleanCode(source['Kode Barang']);
     const name = String(source['Nama Barang'] ?? '').trim();
     const stock = numberValue(source['Stok Awal']);
-    const minimum = numberValue(source['Stok Minimum']);
-    const active = parseActive(source['Status Aktif']);
+    const minimum = String(source['Stok Minimum'] ?? '').trim() === '' ? 0 : numberValue(source['Stok Minimum']);
+    const active = String(source['Status Aktif'] ?? '').trim() === '' ? true : parseActive(source['Status Aktif']);
     const errors = [];
     const warnings = [];
     const key = code.toUpperCase();
@@ -89,10 +91,12 @@ export function createTemplateWorkbook(XLSX) {
   const guidance = [
     ['PANDUAN TEMPLATE IMPORT STOKQR',''],
     ['Aturan penting','Jangan mengubah nama header pada sheet Data Barang.'],
+    ['Kolom wajib','Kode Barang, Nama Barang, dan Stok Awal.'],
+    ['Kolom opsional','Kategori, Satuan, Lokasi, Stok Minimum, Status Aktif, dan Foto.'],
     ['Kode Barang','Wajib dan unik. Contoh benar: BRG-00001 atau 8996001600269. Contoh salah: kosong/duplikat.'],
     ['Nama Barang','Wajib diisi.'],['Kategori','Opsional; default Lainnya.'],['Satuan','Opsional; default PCS.'],['Lokasi','Opsional; default -.'],
-    ['Stok Awal','Angka 0 atau lebih besar.'],['Stok Minimum','Angka 0 atau lebih besar.'],
-    ['Status Aktif','Isi Aktif atau Nonaktif.'],['Foto','Opsional; URL atau data URL jika didukung browser.'],
+    ['Stok Awal','Wajib berupa angka 0 atau lebih besar.'],['Stok Minimum','Opsional; angka 0 atau lebih besar, default 0.'],
+    ['Status Aktif','Opsional; isi Aktif atau Nonaktif, default Aktif.'],['Foto','Opsional; URL atau data URL jika didukung browser.'],
     ['Contoh benar','BRG-00010 | Beras | Bahan Pokok | Kg | Gudang A | 20 | 5 | Aktif'],
     ['Contoh salah','kode kosong, nama kosong, stok -1, atau status selain Aktif/Nonaktif.']
   ];
@@ -101,12 +105,24 @@ export function createTemplateWorkbook(XLSX) {
 }
 
 export function reportRows(items) {
-  return items.map((item,index)=>({No:index+1,Kode:item.code,'Nama Barang':item.name,Kategori:item.category,Lokasi:item.location,Stok:item.stock,Satuan:item.unit,Minimum:item.minimum,Status:stockStatus(item),'Status Aktif':item.active?'Aktif':'Nonaktif','Terakhir Diperbarui':item.updatedAt||''}));
+  return items.map((item,index)=>({No:index+1,Kode:item.code,Barcode:item.barcode||item.code,'Nama Barang':item.name,Kategori:item.category,Lokasi:item.location,Satuan:item.unit,Stok:item.stock,Minimum:item.minimum,Status:stockStatus(item),'Status Aktif':item.active?'Aktif':'Nonaktif','Terakhir Diperbarui':item.updatedAt||''}));
 }
 
 export function createReportWorkbook(XLSX, items, filtersLabel = 'Semua data') {
   if (!XLSX?.utils) throw new Error('Library Excel belum tersedia. Sambungkan internet lalu muat ulang.');
-  const report = XLSX.utils.json_to_sheet(reportRows(items));report['!cols']=[{wch:7},{wch:18},{wch:28},{wch:18},{wch:18},{wch:10},{wch:12},{wch:10},{wch:12},{wch:14},{wch:24}];report['!autofilter']={ref:`A1:K${Math.max(1,items.length+1)}`};
+  const report = XLSX.utils.json_to_sheet(reportRows(items));report['!cols']=[{wch:7},{wch:18},{wch:18},{wch:28},{wch:18},{wch:18},{wch:12},{wch:10},{wch:10},{wch:12},{wch:14},{wch:24}];report['!autofilter']={ref:`A1:L${Math.max(1,items.length+1)}`};
   const stats=inventoryReportStats(items);const summary=XLSX.utils.aoa_to_sheet([['STOKQR - LAPORAN STOK GUDANG'],['Dibuat',new Date().toLocaleString('id-ID')],['Filter',filtersLabel],[],['Total Jenis Barang',stats.totalItems],['Total Stok',stats.totalStock],['Aman',stats.safe],['Menipis',stats.low],['Habis',stats.empty]]);summary['!cols']=[{wch:24},{wch:44}];
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,report,'Laporan Stok');XLSX.utils.book_append_sheet(wb,summary,'Ringkasan');return wb;
+}
+
+export function mutationRows(rows) {
+  return rows.map((row,index)=>{const stamp=new Date(row.createdAt);return {No:index+1,Tanggal:stamp.toLocaleDateString('id-ID'),Jam:stamp.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}),Kode:row.code,'Nama Barang':row.itemName,Kategori:row.category||'-','Jenis Transaksi':row.type,Jumlah:row.amount,'Stok Sebelum':row.before,'Stok Sesudah':row.after,User:row.user||'-',Catatan:row.note||'-',Lokasi:row.location||'-'};});
+}
+
+export function createMutationWorkbook(XLSX, rows, filtersLabel = 'Semua mutasi') {
+  if (!XLSX?.utils) throw new Error('Library Excel belum tersedia. Sambungkan internet lalu muat ulang.');
+  const report=XLSX.utils.json_to_sheet(mutationRows(rows));report['!cols']=[{wch:7},{wch:14},{wch:10},{wch:18},{wch:28},{wch:18},{wch:18},{wch:12},{wch:14},{wch:14},{wch:18},{wch:30},{wch:18}];report['!autofilter']={ref:`A1:M${Math.max(1,rows.length+1)}`};
+  const totalIn=rows.filter(row=>row.type==='STOK MASUK').reduce((sum,row)=>sum+Math.abs(Number(row.amount||0)),0),totalOut=rows.filter(row=>row.type==='STOK KELUAR').reduce((sum,row)=>sum+Math.abs(Number(row.amount||0)),0),adjustments=rows.filter(row=>row.type==='PENYESUAIAN').length;
+  const summary=XLSX.utils.aoa_to_sheet([['STOKQR - LAPORAN MUTASI STOK'],['Dibuat',new Date().toLocaleString('id-ID')],['Filter',filtersLabel],[],['Total Transaksi',rows.length],['Jumlah Stok Masuk',totalIn],['Jumlah Stok Keluar',totalOut],['Jumlah Penyesuaian',adjustments]]);summary['!cols']=[{wch:24},{wch:56}];
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,report,'Mutasi Stok');XLSX.utils.book_append_sheet(wb,summary,'Ringkasan');return wb;
 }
