@@ -58,6 +58,10 @@ export class ScanFeedback {
 }
 
 const RECOVERABLE_DECODE_ERRORS = new Set(['NotFoundException', 'ChecksumException', 'FormatException']);
+const RECOVERABLE_DECODE_MESSAGES = [
+  /No MultiFormat Readers were able to detect the code/i,
+  /No barcode or QR code detected/i
+];
 const CAMERA_CONSTRAINTS = Object.freeze([
   { audio: false, video: { facingMode: { exact: 'environment' } } },
   { audio: false, video: { facingMode: { ideal: 'environment' } } },
@@ -133,7 +137,9 @@ export class BarcodeScanner {
   isRecoverableDecodeError(error) {
     const name = errorName(error);
     if (RECOVERABLE_DECODE_ERRORS.has(name)) return true;
-    return /NotFoundException|ChecksumException|FormatException/.test(`${name} ${error?.message || ''}`);
+    const description = `${name} ${error?.message || ''}`;
+    return /NotFoundException|ChecksumException|FormatException/.test(description) ||
+      RECOVERABLE_DECODE_MESSAGES.some(pattern => pattern.test(description));
   }
 
   canFallback(error) {
