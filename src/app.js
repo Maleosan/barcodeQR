@@ -156,6 +156,7 @@ async function adminPage(){
 }
 
 async function promptLocalMigration(){
+  if(currentProfile?.role!=='admin')return;
   const key=`stokqr-firebase-migration:${currentUser.uid}`;if(localStorage.getItem(key))return;
   let items=[],transactions=[];try{[items,transactions]=await Promise.all([localRepo.allItems(),localRepo.allTransactions()])}catch{localStorage.setItem(key,'no-local-db');return}
   if(!items.length&&!transactions.length){localStorage.setItem(key,'empty');return}

@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { TX, normalizeItem } from '../src/domain.js';
 import {
   itemDocumentId,
@@ -11,7 +14,9 @@ import {
   transactionTypeToFirestore,
   userProfileFromFirestore
 } from '../src/firebase/model.js';
-import { firebaseClientConfig } from '../scripts/config.mjs';
+import { firebaseClientConfig, writeFirestoreRules } from '../scripts/config.mjs';
+
+const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 
 test('konfigurasi client hanya memuat VITE_FIREBASE dan tidak membocorkan email admin', () => {
   const config = firebaseClientConfig({ VITE_FIREBASE_API_KEY: 'key', VITE_FIREBASE_AUTH_DOMAIN: 'domain', VITE_FIREBASE_PROJECT_ID: 'project', VITE_FIREBASE_STORAGE_BUCKET: 'bucket', VITE_FIREBASE_MESSAGING_SENDER_ID: 'sender', VITE_FIREBASE_APP_ID: 'app', VITE_ADMIN_EMAIL: 'private@example.test' });
@@ -51,16 +56,72 @@ test('profil memakai role dan penanda primaryAdmin yang tersimpan di Firestore',
   assert.deepEqual({ role: admin.role, primaryAdmin: admin.primaryAdmin }, { role: 'admin', primaryAdmin: true });
 });
 
-test('security rules mewajibkan auth, melindungi role, main admin, dan update stok atomic', async () => {
+test('generator rules menolak VITE_ADMIN_EMAIL kosong atau tidak valid', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'stokqr-rules-'));
+  try {
+    await assert.rejects(
+      writeFirestoreRules(join(directory, 'firestore.rules'), { VITE_ADMIN_EMAIL: '' }, projectRoot),
+      /VITE_ADMIN_EMAIL wajib diisi/
+    );
+    await assert.rejects(
+      writeFirestoreRules(join(directory, 'firestore.rules'), { VITE_ADMIN_EMAIL: 'bukan-email' }, projectRoot),
+      /alamat email admin yang valid/
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('generator rules mengganti placeholder admin tanpa memasukkannya ke konfigurasi client', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'stokqr-rules-'));
+  const target = join(directory, 'firestore.rules');
+  try {
+    await writeFirestoreRules(target, { VITE_ADMIN_EMAIL: 'PRIMARY.ADMIN@example.test' }, projectRoot);
+    const rules = await readFile(target, 'utf8');
+    assert.match(rules, /request\.auth\.token\.email == "primary\.admin@example\.test"/);
+    assert.doesNotMatch(rules, /__VITE_ADMIN_EMAIL_JSON__/);
+    assert.doesNotMatch(JSON.stringify(firebaseClientConfig({ VITE_ADMIN_EMAIL: 'PRIMARY.ADMIN@example.test' })), /primary\.admin/i);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('security rules mewajibkan auth dan melindungi perubahan role', async () => {
   const rules = await readFile(new URL('../firestore.rules.template', import.meta.url), 'utf8');
+  assert.doesNotMatch(rules, /allow\s+read\s*,\s*write\s*:\s*if\s+false/);
   assert.doesNotMatch(rules, /allow\s+read\s*,\s*write\s*:\s*if\s+true/);
   assert.match(rules, /request\.auth != null/);
   assert.match(rules, /__VITE_ADMIN_EMAIL_JSON__/);
   assert.match(rules, /primaryAdmin/);
   assert.match(rules, /request\.resource\.data\.role == resource\.data\.role/);
-  assert.match(rules, /validAdminUserUpdate/);
+  assert.match(rules, /function validAdminResolution/);
+  assert.match(rules, /resource\.data\.adminRequestStatus == 'pending'/);
+  assert.match(rules, /request\.resource\.data\.adminResolvedBy == request\.auth\.uid/);
+  assert.match(rules, /request\.resource\.data\.adminRequestStatus == 'approved'/);
+  assert.match(rules, /request\.resource\.data\.adminRequestStatus == 'rejected'/);
+});
+
+test('security rules mengikat stok dan transaksi dalam satu atomic write', async () => {
+  const rules = await readFile(new URL('../firestore.rules.template', import.meta.url), 'utf8');
   assert.match(rules, /existsAfter/);
   assert.match(rules, /getAfter/);
+  assert.match(rules, /lastTransactionId == transactionId/);
+  assert.match(rules, /changed\.hasOnly\(\['stok', 'updatedAt', 'updatedBy', 'lastTransactionId'\]\)/);
+  assert.match(rules, /data\.kodeBarang == request\.resource\.data\.kodeBarang/);
+  assert.match(rules, /validLiveTransaction\(transactionId\)/);
+  assert.match(rules, /linkedItemMatchesTransaction\(transactionId\)/);
+  assert.match(rules, /request\.resource\.data\.timestamp == request\.time/);
+  assert.match(rules, /validMigratedTransaction/);
+  assert.match(rules, /return isAdmin\(\) &&\s*request\.resource\.data\.migratedFromIndexedDb == true/);
   assert.match(rules, /jumlahFisik/);
   assert.match(rules, /stokSesudah == request\.resource\.data\.jumlahFisik/);
+});
+
+test('repository Firebase mempertahankan listener realtime dan transaksi atomik', async () => {
+  const source = await readFile(new URL('../src/firebase/firestore.js', import.meta.url), 'utf8');
+  assert.match(source, /onSnapshot\(collection\(this\.db, 'barang'\)/);
+  assert.match(source, /onSnapshot\(transactionQuery/);
+  assert.match(source, /await runTransaction\(this\.db/);
+  assert.match(source, /calculateStockOpname\(item\.stock, counted\)/);
+  assert.match(source, /lastTransactionId: transactionRef\.id/);
 });

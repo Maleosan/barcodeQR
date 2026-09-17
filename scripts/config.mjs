@@ -46,8 +46,12 @@ export async function writeRuntimeConfig(target, env) {
 
 export async function writeFirestoreRules(target, env, root = resolve('.')) {
   const template = await readFile(resolve(root, 'firestore.rules.template'), 'utf8');
-  const adminEmail = env.VITE_ADMIN_EMAIL.toLowerCase() || 'admin@example.invalid';
+  const adminEmail = String(env.VITE_ADMIN_EMAIL || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adminEmail)) {
+    throw new Error('VITE_ADMIN_EMAIL wajib diisi dengan alamat email admin yang valid sebelum Firestore Rules dibuat.');
+  }
   const rules = template.replaceAll('__VITE_ADMIN_EMAIL_JSON__', JSON.stringify(adminEmail));
+  if (rules.includes('__VITE_ADMIN_EMAIL_JSON__')) throw new Error('Placeholder email admin masih tersisa pada Firestore Rules.');
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, rules, 'utf8');
 }

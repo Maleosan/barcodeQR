@@ -6,7 +6,9 @@ service cloud.firestore {
     }
 
     function isMainAdmin() {
-      return signedIn() && request.auth.token.email == __VITE_ADMIN_EMAIL_JSON__;
+      return signedIn() &&
+        request.auth.token.email is string &&
+        request.auth.token.email == __VITE_ADMIN_EMAIL_JSON__;
     }
 
     function isAdmin() {
@@ -25,107 +27,207 @@ service cloud.firestore {
       return status == 'none' || status == 'pending' || status == 'approved' || status == 'rejected';
     }
 
+    function validUserDocument(uid) {
+      return request.resource.data.keys().hasAll([
+        'uid', 'displayName', 'email', 'photoURL', 'role', 'primaryAdmin',
+        'adminRequest', 'adminRequestStatus', 'createdAt', 'lastLoginAt'
+      ]) &&
+      request.resource.data.keys().hasOnly([
+        'uid', 'displayName', 'email', 'photoURL', 'role', 'primaryAdmin',
+        'adminRequest', 'adminRequestStatus', 'adminRequestedAt',
+        'adminResolvedAt', 'adminResolvedBy', 'createdAt', 'lastLoginAt'
+      ]) &&
+      request.resource.data.uid == uid &&
+      request.resource.data.displayName is string &&
+      request.resource.data.email is string &&
+      request.resource.data.photoURL is string &&
+      validUserRole(request.resource.data.role) &&
+      request.resource.data.primaryAdmin is bool &&
+      request.resource.data.adminRequest is bool &&
+      validRequestStatus(request.resource.data.adminRequestStatus) &&
+      request.resource.data.createdAt is timestamp &&
+      request.resource.data.lastLoginAt is timestamp;
+    }
+
     function validOwnUserCreate(uid) {
       return signedIn() && request.auth.uid == uid &&
-        request.resource.data.uid == uid &&
+        validUserDocument(uid) &&
         request.resource.data.email == request.auth.token.email &&
-        validUserRole(request.resource.data.role) &&
-        validRequestStatus(request.resource.data.adminRequestStatus) &&
+        request.resource.data.createdAt == request.time &&
+        request.resource.data.lastLoginAt == request.time &&
         (
-          (isMainAdmin() && request.resource.data.role == 'admin' && request.resource.data.primaryAdmin == true && request.resource.data.adminRequestStatus == 'approved') ||
-          (!isMainAdmin() && request.resource.data.role == 'user' && request.resource.data.primaryAdmin == false && request.resource.data.adminRequestStatus in ['none', 'pending'])
+          (
+            isMainAdmin() &&
+            request.resource.data.role == 'admin' &&
+            request.resource.data.primaryAdmin == true &&
+            request.resource.data.adminRequest == false &&
+            request.resource.data.adminRequestStatus == 'approved'
+          ) ||
+          (
+            !isMainAdmin() &&
+            request.resource.data.role == 'user' &&
+            request.resource.data.primaryAdmin == false &&
+            (
+              (
+                request.resource.data.adminRequest == false &&
+                request.resource.data.adminRequestStatus == 'none'
+              ) ||
+              (
+                request.resource.data.adminRequest == true &&
+                request.resource.data.adminRequestStatus == 'pending' &&
+                request.resource.data.adminRequestedAt is timestamp
+              )
+            )
+          )
         );
     }
 
     function safeOwnUserUpdate(uid) {
       let changed = request.resource.data.diff(resource.data).affectedKeys();
       return signedIn() && request.auth.uid == uid &&
+        validUserDocument(uid) &&
         request.resource.data.uid == resource.data.uid &&
         request.resource.data.email == resource.data.email &&
         request.resource.data.role == resource.data.role &&
-        (
-          (resource.data.primaryAdmin == true && request.resource.data.primaryAdmin == true) ||
-          (resource.data.primaryAdmin != true && request.resource.data.primaryAdmin == false)
-        ) &&
-        changed.hasOnly(['displayName', 'photoURL', 'lastLoginAt', 'adminRequest', 'adminRequestStatus', 'adminRequestedAt']) &&
-        validRequestStatus(request.resource.data.adminRequestStatus) &&
+        request.resource.data.primaryAdmin == resource.data.primaryAdmin &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        changed.hasOnly([
+          'displayName', 'photoURL', 'lastLoginAt',
+          'adminRequest', 'adminRequestStatus', 'adminRequestedAt'
+        ]) &&
         (
           !changed.hasAny(['adminRequest', 'adminRequestStatus', 'adminRequestedAt']) ||
           (
-            request.resource.data.adminRequestStatus != 'approved' &&
-            (request.resource.data.adminRequestStatus != 'pending' || request.resource.data.adminRequest == true)
+            request.resource.data.role == 'user' &&
+            request.resource.data.primaryAdmin == false &&
+            request.resource.data.adminRequest == true &&
+            request.resource.data.adminRequestStatus == 'pending' &&
+            request.resource.data.adminRequestedAt is timestamp
           )
         );
-    }
-
-    function protectsMainAdmin() {
-      return resource.data.primaryAdmin != true ||
-        (request.resource.data.role == 'admin' && request.resource.data.primaryAdmin == true && request.resource.data.adminRequestStatus == 'approved');
     }
 
     function validPrimaryAdminSelfUpdate(uid) {
       let changed = request.resource.data.diff(resource.data).affectedKeys();
       return isMainAdmin() && request.auth.uid == uid &&
+        validUserDocument(uid) &&
         request.resource.data.uid == resource.data.uid &&
         request.resource.data.email == resource.data.email &&
+        request.resource.data.createdAt == resource.data.createdAt &&
         request.resource.data.role == 'admin' &&
         request.resource.data.primaryAdmin == true &&
         request.resource.data.adminRequest == false &&
         request.resource.data.adminRequestStatus == 'approved' &&
-        changed.hasOnly(['displayName', 'photoURL', 'lastLoginAt', 'role', 'primaryAdmin', 'adminRequest', 'adminRequestStatus']);
+        changed.hasOnly([
+          'displayName', 'photoURL', 'lastLoginAt', 'role',
+          'primaryAdmin', 'adminRequest', 'adminRequestStatus'
+        ]);
     }
 
-    function validAdminUserUpdate() {
+    function validAdminResolution(uid) {
       let changed = request.resource.data.diff(resource.data).affectedKeys();
       return isAdmin() &&
+        validUserDocument(uid) &&
+        resource.data.primaryAdmin != true &&
+        resource.data.adminRequest == true &&
+        resource.data.adminRequestStatus == 'pending' &&
         request.resource.data.uid == resource.data.uid &&
         request.resource.data.email == resource.data.email &&
+        request.resource.data.primaryAdmin == false &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        request.resource.data.adminRequest == false &&
+        request.resource.data.adminResolvedAt is timestamp &&
+        request.resource.data.adminResolvedBy == request.auth.uid &&
+        changed.hasOnly([
+          'role', 'adminRequest', 'adminRequestStatus',
+          'adminResolvedAt', 'adminResolvedBy'
+        ]) &&
         (
-          (resource.data.primaryAdmin == true && request.resource.data.primaryAdmin == true) ||
-          (resource.data.primaryAdmin != true && request.resource.data.primaryAdmin == false)
-        ) &&
-        changed.hasOnly(['role', 'adminRequest', 'adminRequestStatus', 'adminResolvedAt', 'adminResolvedBy']) &&
-        validUserRole(request.resource.data.role) &&
-        validRequestStatus(request.resource.data.adminRequestStatus) &&
-        protectsMainAdmin();
+          (
+            request.resource.data.role == 'admin' &&
+            request.resource.data.adminRequestStatus == 'approved'
+          ) ||
+          (
+            request.resource.data.role == 'user' &&
+            request.resource.data.adminRequestStatus == 'rejected'
+          )
+        );
     }
 
     function validBarang() {
       return request.resource.data.keys().hasAll([
-        'kodeBarang', 'namaBarang', 'kategori', 'satuan', 'stok',
-        'stokMinimum', 'lokasi', 'createdAt', 'updatedAt', 'updatedBy'
+        'kodeBarang', 'barcode', 'namaBarang', 'kategori', 'satuan', 'stok',
+        'stokMinimum', 'harga', 'lokasi', 'photo', 'active', 'generated',
+        'createdAt', 'updatedAt', 'updatedBy'
+      ]) &&
+      request.resource.data.keys().hasOnly([
+        'kodeBarang', 'barcode', 'namaBarang', 'kategori', 'satuan', 'stok',
+        'stokMinimum', 'harga', 'lokasi', 'photo', 'active', 'generated',
+        'createdAt', 'updatedAt', 'updatedBy', 'lastTransactionId'
       ]) &&
       request.resource.data.kodeBarang is string &&
+      request.resource.data.barcode is string &&
       request.resource.data.namaBarang is string &&
+      request.resource.data.kategori is string &&
+      request.resource.data.satuan is string &&
+      request.resource.data.lokasi is string &&
+      request.resource.data.photo is string &&
+      request.resource.data.active is bool &&
+      request.resource.data.generated is bool &&
       request.resource.data.stok is number && request.resource.data.stok >= 0 &&
       request.resource.data.stokMinimum is number && request.resource.data.stokMinimum >= 0 &&
       request.resource.data.harga is number && request.resource.data.harga >= 0 &&
       request.resource.data.createdAt is timestamp &&
-      request.resource.data.updatedAt is timestamp &&
+      request.resource.data.createdAt <= request.time &&
+      request.resource.data.updatedAt == request.time &&
       request.resource.data.updatedBy == request.auth.uid;
     }
 
+    function linkedTransactionMatchesItem(itemId, transactionId) {
+      return request.resource.data.lastTransactionId == transactionId &&
+        !exists(/databases/$(database)/documents/transaksi/$(transactionId)) &&
+        existsAfter(/databases/$(database)/documents/transaksi/$(transactionId)) &&
+        getAfter(/databases/$(database)/documents/transaksi/$(transactionId)).data.id == transactionId &&
+        getAfter(/databases/$(database)/documents/transaksi/$(transactionId)).data.itemId == itemId &&
+        getAfter(/databases/$(database)/documents/transaksi/$(transactionId)).data.kodeBarang == resource.data.kodeBarang &&
+        getAfter(/databases/$(database)/documents/transaksi/$(transactionId)).data.namaBarang == resource.data.namaBarang &&
+        getAfter(/databases/$(database)/documents/transaksi/$(transactionId)).data.kategori == resource.data.kategori &&
+        getAfter(/databases/$(database)/documents/transaksi/$(transactionId)).data.lokasi == resource.data.lokasi &&
+        getAfter(/databases/$(database)/documents/transaksi/$(transactionId)).data.userId == request.auth.uid &&
+        getAfter(/databases/$(database)/documents/transaksi/$(transactionId)).data.stokSebelum == resource.data.stok &&
+        getAfter(/databases/$(database)/documents/transaksi/$(transactionId)).data.stokSesudah == request.resource.data.stok;
+    }
+
     function validAtomicStockUpdate(itemId) {
-      return request.resource.data.stok == resource.data.stok || (
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      return (
+        !changed.hasAny(['stok', 'lastTransactionId'])
+      ) || (
+        changed.hasOnly(['stok', 'updatedAt', 'updatedBy', 'lastTransactionId']) &&
         request.resource.data.lastTransactionId is string &&
-        !exists(/databases/$(database)/documents/transaksi/$(request.resource.data.lastTransactionId)) &&
-        existsAfter(/databases/$(database)/documents/transaksi/$(request.resource.data.lastTransactionId)) &&
-        getAfter(/databases/$(database)/documents/transaksi/$(request.resource.data.lastTransactionId)).data.itemId == itemId &&
-        getAfter(/databases/$(database)/documents/transaksi/$(request.resource.data.lastTransactionId)).data.userId == request.auth.uid &&
-        getAfter(/databases/$(database)/documents/transaksi/$(request.resource.data.lastTransactionId)).data.stokSebelum == resource.data.stok &&
-        getAfter(/databases/$(database)/documents/transaksi/$(request.resource.data.lastTransactionId)).data.stokSesudah == request.resource.data.stok
+        linkedTransactionMatchesItem(itemId, request.resource.data.lastTransactionId)
       );
     }
 
-    function validTransaction(transactionId) {
+    function validTransactionDocument(transactionId) {
       return request.resource.data.keys().hasAll([
-        'id', 'itemId', 'kodeBarang', 'namaBarang', 'jenis', 'jumlah',
-        'stokSebelum', 'stokSesudah', 'userId', 'userName',
-        'userEmail', 'timestamp', 'keterangan'
+        'id', 'itemId', 'kodeBarang', 'namaBarang', 'kategori', 'lokasi',
+        'jenis', 'jumlah', 'stokSebelum', 'stokSesudah', 'userId',
+        'userName', 'userEmail', 'timestamp', 'keterangan'
+      ]) &&
+      request.resource.data.keys().hasOnly([
+        'id', 'itemId', 'kodeBarang', 'namaBarang', 'kategori', 'lokasi',
+        'jenis', 'jumlah', 'stokSebelum', 'jumlahFisik', 'selisih',
+        'stokSesudah', 'userId', 'userName', 'userEmail', 'timestamp',
+        'keterangan', 'originalUserId', 'originalUserName',
+        'originalUserEmail', 'migratedFromIndexedDb'
       ]) &&
       request.resource.data.id == transactionId &&
+      request.resource.data.itemId is string &&
       request.resource.data.kodeBarang is string &&
       request.resource.data.namaBarang is string &&
+      request.resource.data.kategori is string &&
+      request.resource.data.lokasi is string &&
       request.resource.data.userId == request.auth.uid &&
       request.resource.data.userEmail == request.auth.token.email &&
       request.resource.data.userName is string &&
@@ -133,51 +235,99 @@ service cloud.firestore {
       request.resource.data.keterangan is string &&
       request.resource.data.jenis in ['TAMBAH', 'KURANG', 'STOK_OPNAME', 'PENYESUAIAN'] &&
       request.resource.data.jumlah is number &&
-      request.resource.data.stokSebelum is number &&
-      request.resource.data.stokSesudah is number && request.resource.data.stokSesudah >= 0 &&
-      (
-        (request.resource.data.jenis == 'TAMBAH' && request.resource.data.jumlah > 0 && request.resource.data.stokSesudah == request.resource.data.stokSebelum + request.resource.data.jumlah) ||
-        (request.resource.data.jenis == 'KURANG' && request.resource.data.jumlah > 0 && request.resource.data.stokSesudah == request.resource.data.stokSebelum - request.resource.data.jumlah) ||
-        request.resource.data.jenis == 'PENYESUAIAN' ||
-        (
-          request.resource.data.jenis == 'STOK_OPNAME' &&
-          request.resource.data.keys().hasAll(['jumlahFisik', 'selisih']) &&
-          request.resource.data.jumlahFisik is number && request.resource.data.jumlahFisik >= 0 &&
-          request.resource.data.selisih == request.resource.data.jumlahFisik - request.resource.data.stokSebelum &&
-          request.resource.data.jumlah == request.resource.data.selisih &&
-          request.resource.data.stokSesudah == request.resource.data.jumlahFisik
-        )
+      request.resource.data.stokSebelum is number && request.resource.data.stokSebelum >= 0 &&
+      request.resource.data.stokSesudah is number && request.resource.data.stokSesudah >= 0;
+    }
+
+    function validLiveTransactionAmounts() {
+      return (
+        request.resource.data.jenis == 'TAMBAH' &&
+        request.resource.data.jumlah > 0 &&
+        request.resource.data.stokSesudah == request.resource.data.stokSebelum + request.resource.data.jumlah
+      ) || (
+        request.resource.data.jenis == 'KURANG' &&
+        request.resource.data.jumlah > 0 &&
+        request.resource.data.stokSesudah == request.resource.data.stokSebelum - request.resource.data.jumlah
+      ) || (
+        request.resource.data.jenis == 'STOK_OPNAME' &&
+        request.resource.data.keys().hasAll(['jumlahFisik', 'selisih']) &&
+        request.resource.data.jumlahFisik is number &&
+        request.resource.data.jumlahFisik >= 0 &&
+        request.resource.data.selisih == request.resource.data.jumlahFisik - request.resource.data.stokSebelum &&
+        request.resource.data.jumlah == request.resource.data.selisih &&
+        request.resource.data.stokSesudah == request.resource.data.jumlahFisik
       );
+    }
+
+    function linkedItemMatchesTransaction(transactionId) {
+      let itemId = request.resource.data.itemId;
+      return exists(/databases/$(database)/documents/barang/$(itemId)) &&
+        existsAfter(/databases/$(database)/documents/barang/$(itemId)) &&
+        get(/databases/$(database)/documents/barang/$(itemId)).data.stok == request.resource.data.stokSebelum &&
+        get(/databases/$(database)/documents/barang/$(itemId)).data.kodeBarang == request.resource.data.kodeBarang &&
+        get(/databases/$(database)/documents/barang/$(itemId)).data.namaBarang == request.resource.data.namaBarang &&
+        get(/databases/$(database)/documents/barang/$(itemId)).data.kategori == request.resource.data.kategori &&
+        get(/databases/$(database)/documents/barang/$(itemId)).data.lokasi == request.resource.data.lokasi &&
+        getAfter(/databases/$(database)/documents/barang/$(itemId)).data.stok == request.resource.data.stokSesudah &&
+        getAfter(/databases/$(database)/documents/barang/$(itemId)).data.lastTransactionId == transactionId &&
+        getAfter(/databases/$(database)/documents/barang/$(itemId)).data.updatedBy == request.auth.uid;
+    }
+
+    function validLiveTransaction(transactionId) {
+      return !request.resource.data.keys().hasAny([
+        'migratedFromIndexedDb', 'originalUserId',
+        'originalUserName', 'originalUserEmail'
+      ]) &&
+      request.resource.data.timestamp == request.time &&
+      request.resource.data.jenis in ['TAMBAH', 'KURANG', 'STOK_OPNAME'] &&
+      validLiveTransactionAmounts() &&
+      linkedItemMatchesTransaction(transactionId);
+    }
+
+    function validMigratedTransaction() {
+      return isAdmin() &&
+        request.resource.data.migratedFromIndexedDb == true &&
+        request.resource.data.originalUserId is string &&
+        request.resource.data.originalUserName is string &&
+        request.resource.data.originalUserEmail is string;
+    }
+
+    function validTransactionCreate(transactionId) {
+      return validTransactionDocument(transactionId) &&
+        (validLiveTransaction(transactionId) || validMigratedTransaction());
     }
 
     match /users/{uid} {
       allow get: if signedIn() && (request.auth.uid == uid || isAdmin());
       allow list: if isAdmin();
       allow create: if validOwnUserCreate(uid);
-      allow update: if validPrimaryAdminSelfUpdate(uid) || validAdminUserUpdate() || safeOwnUserUpdate(uid);
+      allow update: if validPrimaryAdminSelfUpdate(uid) || safeOwnUserUpdate(uid) || validAdminResolution(uid);
       allow delete: if isAdmin() && resource.data.primaryAdmin != true;
     }
 
     match /barang/{itemId} {
       allow read: if signedIn();
       allow create: if signedIn() && validBarang();
-      allow update: if signedIn() && validBarang() && validAtomicStockUpdate(itemId);
+      allow update: if signedIn() &&
+        validBarang() &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        validAtomicStockUpdate(itemId);
       allow delete: if signedIn();
     }
 
     match /presence/{uid} {
       allow read: if signedIn();
-      allow create, update: if signedIn() && request.auth.uid == uid &&
+      allow create, update: if signedIn() &&
+        request.auth.uid == uid &&
         request.resource.data.uid == uid &&
-        request.resource.data.lastSeenAt is timestamp &&
+        request.resource.data.lastSeenAt == request.time &&
         request.resource.data.keys().hasOnly(['uid', 'lastSeenAt']);
       allow delete: if signedIn() && request.auth.uid == uid;
     }
 
     match /transaksi/{transactionId} {
       allow read: if signedIn();
-      allow create: if signedIn() && validTransaction(transactionId);
-      allow update, delete: if isAdmin();
+      allow create: if signedIn() && validTransactionCreate(transactionId);
     }
   }
 }

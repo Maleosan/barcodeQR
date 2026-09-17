@@ -5,6 +5,8 @@ import { loadEnvironment, missingFirebaseKeys, writeFirestoreRules, writeRuntime
 const root = resolve('.');
 const output = resolve(root, 'dist');
 const env = await loadEnvironment(root);
+const missing = missingFirebaseKeys(env);
+if (missing.length) throw new Error(`Build dihentikan karena konfigurasi belum lengkap: ${missing.join(', ')}.`);
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 for (const path of ['index.html', 'styles.css', 'manifest.webmanifest', 'service-worker.js', 'assets', 'src']) {
@@ -12,6 +14,4 @@ for (const path of ['index.html', 'styles.css', 'manifest.webmanifest', 'service
 }
 await writeRuntimeConfig(resolve(output, 'firebase-config.js'), env);
 await writeFirestoreRules(resolve(root, '.firebase/firestore.rules'), env, root);
-const missing = missingFirebaseKeys(env);
-if (missing.length) console.warn(`Build dibuat dengan konfigurasi kosong untuk: ${missing.join(', ')}.`);
 console.log('Build production tersedia di dist/.');

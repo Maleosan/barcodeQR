@@ -45,7 +45,9 @@ npx firebase-tools use YOUR_PROJECT_ID
 npx firebase-tools deploy --only firestore:rules
 ```
 
-`VITE_ADMIN_EMAIL` hanya dipakai untuk menghasilkan `.firebase/firestore.rules` secara lokal/deployment. Alamat tersebut tidak dimasukkan ke `firebase-config.js` atau `dist/`. Jangan menjalankan aplikasi produksi dengan rules test mode.
+`VITE_ADMIN_EMAIL` hanya dipakai untuk menghasilkan `.firebase/firestore.rules` secara lokal/deployment. Alamat tersebut tidak dimasukkan ke `firebase-config.js` atau `dist/`. Generator dan build akan berhenti jika variabel wajib kosong, sehingga rules dengan admin fallback tidak dapat ter-deploy tanpa sengaja. Jangan menjalankan aplikasi produksi dengan rules test mode.
+
+Security Rules mengizinkan user terautentikasi menggunakan data stok, tetapi perubahan role hanya dapat dilakukan oleh admin saat menyelesaikan request yang berstatus `pending`. Perubahan stok wajib disertai dokumen transaksi yang cocok pada atomic write yang sama. Migrasi riwayat IndexedDB dibatasi untuk admin karena data historis tidak mempunyai pasangan perubahan stok Firestore saat ini.
 
 ## Menjalankan lokal
 
