@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import { normalizeItem,nextGeneratedCode,calculateTransaction,TX,stockStatus,filterTransactions,filterTransactionReport,dashboardStats,inventoryCsv,transactionCsv,SCAN_FORMATS,cleanCode,filterInventory,inventoryReportStats } from '../src/domain.js';import { InventoryRepository } from '../src/repository.js';import { BarcodeScanner,ScanFeedback,ScannerSettingsStore,cameraCapabilityProfile,normalizeScannerSettings,scannerResumeDelay } from '../src/scanner.js';import { IMPORT_HEADERS,REQUIRED_IMPORT_HEADERS,buildImportBatch,createMutationWorkbook,createReportWorkbook,createTemplateWorkbook,parseActive,validateImportHeaders,validateImportRows } from '../src/excel.js';
+import test from 'node:test';import assert from 'node:assert/strict';import { normalizeItem,nextGeneratedCode,calculateStockOpname,calculateTransaction,TX,stockStatus,filterTransactions,filterTransactionReport,dashboardStats,inventoryCsv,stockOpnameCsv,stockOpnameStats,transactionCsv,SCAN_FORMATS,cleanCode,filterInventory,inventoryReportStats } from '../src/domain.js';import { InventoryRepository } from '../src/repository.js';import { BarcodeScanner,ScanFeedback,ScannerSettingsStore,cameraCapabilityProfile,normalizeScannerSettings,scannerResumeDelay } from '../src/scanner.js';import { IMPORT_HEADERS,REQUIRED_IMPORT_HEADERS,buildImportBatch,createMutationWorkbook,createReportWorkbook,createStockOpnameWorkbook,createTemplateWorkbook,parseActive,stockOpnameRows,validateImportHeaders,validateImportRows } from '../src/excel.js';
 const item=(over={})=>normalizeItem({code:'8991234567890',name:'Indomie',category:'Makanan',unit:'PCS',location:'A',stock:10,minimum:2,...over});
 test('tambah barang membentuk record lengkap',()=>assert.equal(item().name,'Indomie'));
 test('edit barang mempertahankan id dan createdAt',()=>{const a=item(),b=normalizeItem({...a,name:'Baru'},a);assert.equal(b.id,a.id);assert.equal(b.createdAt,a.createdAt)});
@@ -49,6 +49,30 @@ const mutationRows=()=>[{code:'1',itemName:'Aqua',category:'Minuman',location:'A
 test('filter laporan mutasi mendukung custom tanggal jenis kategori lokasi dan pencarian',()=>{const rows=filterTransactionReport(mutationRows(),{period:'custom',startDate:'2026-09-15',endDate:'2026-09-16',type:TX.IN,category:'Minuman',location:'A',query:'aqua'},new Date('2026-09-16T12:00:00Z'));assert.deepEqual(rows.map(row=>row.code),['1'])});
 test('CSV mutasi memuat stok sebelum sesudah user dan catatan',()=>{const csv=transactionCsv(mutationRows());assert.match(csv,/Stok Sebelum,Stok Sesudah,User,Catatan/);assert.match(csv,/Scan/)});
 test('export Excel mutasi memiliki laporan dan ringkasan',()=>assert.deepEqual(createMutationWorkbook(fakeXlsx,mutationRows()).SheetNames,['Mutasi Stok','Ringkasan']));
+
+const opnameRows=()=>[
+  {id:'o1',itemId:'i1',code:'1',itemName:'Aqua',category:'Minuman',location:'A',type:TX.STOCK_OPNAME,amount:0,before:20,counted:20,difference:0,after:20,user:'Admin',note:'Rak A',createdAt:'2026-09-16T08:00:00.000Z'},
+  {id:'o2',itemId:'i2',code:'2',itemName:'Kopi',category:'Minuman',location:'B',type:TX.STOCK_OPNAME,amount:-3,before:20,counted:17,difference:-3,after:17,user:'Admin',note:'Rusak',createdAt:'2026-09-16T09:00:00.000Z'},
+  {id:'o3',itemId:'i3',code:'3',itemName:'Gula',category:'Bahan',location:'A',type:TX.STOCK_OPNAME,amount:5,before:20,counted:25,difference:5,after:25,user:'Admin',note:'Temuan',createdAt:'2026-09-15T09:00:00.000Z'}
+];
+test('opname sama dengan stok sistem menghasilkan selisih 0',()=>assert.deepEqual(calculateStockOpname(20,20),{before:20,counted:20,difference:0,after:20,amount:0}));
+test('opname lebih kecil menghasilkan adjustment negatif',()=>assert.equal(calculateStockOpname(20,17).difference,-3));
+test('opname lebih besar menghasilkan adjustment positif',()=>assert.equal(calculateStockOpname(20,25).difference,5));
+test('stok fisik 0 valid dan menjadi stok akhir',()=>assert.deepEqual(calculateStockOpname(20,0),{before:20,counted:0,difference:-20,after:0,amount:-20}));
+test('stok fisik negatif ditolak',()=>assert.throws(()=>calculateStockOpname(20,-1),/0 atau lebih/));
+test('input jumlah fisik kosong ditolak',()=>assert.throws(()=>calculateStockOpname(20,''),/wajib/));
+test('stok akhir opname selalu sama dengan jumlah fisik',()=>{for(const counted of [0,17,20,25])assert.equal(calculateStockOpname(20,counted).after,counted)});
+test('history transaksi lama tetap dapat dibaca dan difilter',()=>{const old=mutationRows();assert.equal(filterTransactionReport(old,{period:'all',type:TX.IN}).length,1);assert.equal(old[0].counted,undefined)});
+test('filter laporan STOCK_OPNAME hanya mengembalikan opname',()=>{const rows=[...mutationRows(),...opnameRows()];assert.equal(filterTransactionReport(rows,{period:'all',type:TX.STOCK_OPNAME}).length,3);assert.equal(filterTransactionReport(rows,{period:'all',type:'adjustment'}).length,3)});
+test('summary laporan opname menghitung sesuai selisih positif dan negatif',()=>assert.deepEqual(stockOpnameStats(opnameRows()),{total:3,matched:1,different:2,positive:1,negative:1}));
+test('export CSV dan Excel opname memuat field fisik selisih dan ringkasan',()=>{const csv=stockOpnameCsv(opnameRows()),workbook=createStockOpnameWorkbook(fakeXlsx,opnameRows(),'Semua');assert.match(csv,/Stok Sistem,Stok Fisik,Selisih,Stok Akhir/);assert.match(csv,/"-3"/);assert.deepEqual(workbook.SheetNames,['Stok Opname','Ringkasan']);assert.equal(stockOpnameRows(opnameRows())[1]['Stok Fisik'],17)});
+
+function stockOpnameRepositoryHarness(stock=20){
+  let current=item({id:'item-opname',code:'OP-1',name:'Barang Opname',stock});const transactions=[];
+  const db={transaction:()=>{let tx;const itemStore={get:()=>{const request={};queueMicrotask(()=>{request.result=current;request.onsuccess?.()});return request},put:value=>{current={...value};queueMicrotask(()=>tx.oncomplete?.())}},transactionStore={put:value=>transactions.push({...value})};tx={objectStore:name=>name==='items'?itemStore:transactionStore,abort:()=>queueMicrotask(()=>tx.onabort?.())};return tx}};
+  const repository=new InventoryRepository(null);repository.open=async()=>db;return {repository,transactions,current:()=>current};
+}
+test('repository menyimpan STOCK_OPNAME atomic dengan before counted difference after yang benar',async()=>{const harness=stockOpnameRepositoryHarness(20),result=await harness.repository.stockOpname('item-opname',17,'Hitung fisik','Admin');assert.equal(harness.transactions.length,1);assert.deepEqual({type:result.type,before:result.before,counted:result.counted,difference:result.difference,after:result.after},{type:TX.STOCK_OPNAME,before:20,counted:17,difference:-3,after:17});assert.equal(harness.current().stock,17)});
 
 function scannerHarness({ startError, startErrors, feedback } = {}) {
   const sessions = [];

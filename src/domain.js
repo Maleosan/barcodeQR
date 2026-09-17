@@ -1,4 +1,4 @@
-export const TX = Object.freeze({ IN: 'STOK MASUK', OUT: 'STOK KELUAR', ADJUST: 'PENYESUAIAN' });
+export const TX = Object.freeze({ IN: 'STOK MASUK', OUT: 'STOK KELUAR', ADJUST: 'PENYESUAIAN', STOCK_OPNAME: 'STOCK_OPNAME' });
 export const SCAN_FORMATS = Object.freeze(['QR_CODE', 'EAN_13', 'EAN_8', 'UPC_A', 'CODE_128', 'CODE_39']);
 export function cleanCode(value) { return String(value ?? '').trim(); }
 export function stockStatus(item) { return item.stock <= 0 ? 'HABIS' : item.stock <= item.minimum ? 'MENIPIS' : 'AMAN'; }
@@ -26,11 +26,21 @@ export function normalizeItem(input, previous = {}) {
   return item;
 }
 export function calculateTransaction(stock, type, amount) {
+  if (type === TX.STOCK_OPNAME) return calculateStockOpname(stock, amount);
   const qty = Number(amount);
   if (!Number.isFinite(qty) || qty <= 0) throw new Error('Jumlah harus lebih dari 0.');
+  if (![TX.IN, TX.OUT, TX.ADJUST].includes(type)) throw new Error('Jenis transaksi tidak valid.');
   const after = type === TX.IN ? stock + qty : type === TX.OUT ? stock - qty : qty;
   if (after < 0) throw new Error('Stok tidak mencukupi.');
   return { before: stock, after, amount: type === TX.ADJUST ? after - stock : qty };
+}
+export function calculateStockOpname(stock, counted) {
+  if (counted === '' || counted === null || counted === undefined) throw new Error('Jumlah fisik wajib diisi.');
+  const before = Number(stock); const physical = Number(counted);
+  if (!Number.isFinite(before) || before < 0) throw new Error('Stok sistem tidak valid.');
+  if (!Number.isFinite(physical) || physical < 0) throw new Error('Jumlah fisik harus berupa angka 0 atau lebih.');
+  const difference = physical - before;
+  return { before, counted: physical, difference, after: physical, amount: difference };
 }
 export function filterTransactions(rows, period, query = '', now = new Date()) {
   const q = query.toLowerCase(); const start = new Date(now);
@@ -53,7 +63,8 @@ export function filterTransactionReport(rows, filters = {}, now = new Date()) {
     const createdAt = new Date(row.createdAt);
     if (start && createdAt < start) return false;
     if (end && createdAt > end) return false;
-    if (filters.type && filters.type !== 'all' && row.type !== filters.type) return false;
+    if (filters.type === 'adjustment' && ![TX.ADJUST, TX.STOCK_OPNAME].includes(row.type)) return false;
+    if (filters.type && !['all','adjustment'].includes(filters.type) && row.type !== filters.type) return false;
     if (filters.category && filters.category !== 'all' && row.category !== filters.category) return false;
     if (filters.location && filters.location !== 'all' && row.location !== filters.location) return false;
     return !query || `${row.itemName} ${row.code} ${row.category || ''} ${row.note || ''}`.toLowerCase().includes(query);
@@ -65,10 +76,27 @@ export function inventoryCsv(items) {
 }
 export function transactionCsv(rows) {
   const esc = value => `"${String(value ?? '').replaceAll('"', '""')}"`;
-  return ['No,Tanggal,Jam,Kode,Nama Barang,Kategori,Jenis Transaksi,Jumlah,Stok Sebelum,Stok Sesudah,User,Catatan,Lokasi', ...rows.map((row,index) => {
+  return ['No,Tanggal,Jam,Kode,Nama Barang,Kategori,Jenis Transaksi,Jumlah,Stok Sebelum,Stok Sesudah,User,Catatan,Lokasi,Stok Fisik,Selisih', ...rows.map((row,index) => {
     const timestamp = new Date(row.createdAt);
-    return [index+1,timestamp.toLocaleDateString('id-ID'),timestamp.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}),row.code,row.itemName,row.category||'-',row.type,row.amount,row.before,row.after,row.user||'-',row.note||'-',row.location||'-'].map(esc).join(',');
+    return [index+1,timestamp.toLocaleDateString('id-ID'),timestamp.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}),row.code,row.itemName,row.category||'-',row.type,row.amount,row.before,row.after,row.user||'-',row.note||'-',row.location||'-',row.counted??'',row.difference??''].map(esc).join(',');
   })].join('\n');
+}
+export function stockOpnameCsv(rows) {
+  const esc = value => `"${String(value ?? '').replaceAll('"', '""')}"`;
+  return ['No,Tanggal,Jam,Kode,Nama Barang,Kategori,Stok Sistem,Stok Fisik,Selisih,Stok Akhir,User,Catatan', ...rows.map((row,index) => {
+    const timestamp = new Date(row.createdAt);
+    return [index+1,timestamp.toLocaleDateString('id-ID'),timestamp.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}),row.code,row.itemName,row.category||'-',row.before,row.counted,row.difference,row.after,row.user||'-',row.note||'-'].map(esc).join(',');
+  })].join('\n');
+}
+export function stockOpnameStats(rows) {
+  const opname = rows.filter(row => row.type === TX.STOCK_OPNAME);
+  return {
+    total: opname.length,
+    matched: opname.filter(row => Number(row.difference) === 0).length,
+    different: opname.filter(row => Number(row.difference) !== 0).length,
+    positive: opname.filter(row => Number(row.difference) > 0).length,
+    negative: opname.filter(row => Number(row.difference) < 0).length
+  };
 }
 export function dashboardStats(items) {
   const active = items.filter(i => i.active);
