@@ -1,4 +1,4 @@
-import { cleanCode, inventoryReportStats, stockStatus } from './domain.js';
+import { cleanCode, inventoryReportStats, stockOpnameStats, stockStatus, TX } from './domain.js';
 
 export const IMPORT_HEADERS = Object.freeze(['Kode Barang','Nama Barang','Kategori','Satuan','Lokasi','Stok Awal','Stok Minimum','Status Aktif','Foto']);
 export const REQUIRED_IMPORT_HEADERS = Object.freeze(['Kode Barang','Nama Barang','Stok Awal']);
@@ -116,13 +116,24 @@ export function createReportWorkbook(XLSX, items, filtersLabel = 'Semua data') {
 }
 
 export function mutationRows(rows) {
-  return rows.map((row,index)=>{const stamp=new Date(row.createdAt);return {No:index+1,Tanggal:stamp.toLocaleDateString('id-ID'),Jam:stamp.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}),Kode:row.code,'Nama Barang':row.itemName,Kategori:row.category||'-','Jenis Transaksi':row.type,Jumlah:row.amount,'Stok Sebelum':row.before,'Stok Sesudah':row.after,User:row.user||'-',Catatan:row.note||'-',Lokasi:row.location||'-'};});
+  return rows.map((row,index)=>{const stamp=new Date(row.createdAt);return {No:index+1,Tanggal:stamp.toLocaleDateString('id-ID'),Jam:stamp.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}),Kode:row.code,'Nama Barang':row.itemName,Kategori:row.category||'-','Jenis Transaksi':row.type,Jumlah:row.amount,'Stok Sebelum':row.before,'Stok Fisik':row.counted??'','Selisih':row.difference??'','Stok Sesudah':row.after,User:row.user||'-',Catatan:row.note||'-',Lokasi:row.location||'-'};});
 }
 
 export function createMutationWorkbook(XLSX, rows, filtersLabel = 'Semua mutasi') {
   if (!XLSX?.utils) throw new Error('Library Excel belum tersedia. Sambungkan internet lalu muat ulang.');
-  const report=XLSX.utils.json_to_sheet(mutationRows(rows));report['!cols']=[{wch:7},{wch:14},{wch:10},{wch:18},{wch:28},{wch:18},{wch:18},{wch:12},{wch:14},{wch:14},{wch:18},{wch:30},{wch:18}];report['!autofilter']={ref:`A1:M${Math.max(1,rows.length+1)}`};
-  const totalIn=rows.filter(row=>row.type==='STOK MASUK').reduce((sum,row)=>sum+Math.abs(Number(row.amount||0)),0),totalOut=rows.filter(row=>row.type==='STOK KELUAR').reduce((sum,row)=>sum+Math.abs(Number(row.amount||0)),0),adjustments=rows.filter(row=>row.type==='PENYESUAIAN').length;
-  const summary=XLSX.utils.aoa_to_sheet([['STOKQR - LAPORAN MUTASI STOK'],['Dibuat',new Date().toLocaleString('id-ID')],['Filter',filtersLabel],[],['Total Transaksi',rows.length],['Jumlah Stok Masuk',totalIn],['Jumlah Stok Keluar',totalOut],['Jumlah Penyesuaian',adjustments]]);summary['!cols']=[{wch:24},{wch:56}];
+  const report=XLSX.utils.json_to_sheet(mutationRows(rows));report['!cols']=[{wch:7},{wch:14},{wch:10},{wch:18},{wch:28},{wch:18},{wch:18},{wch:12},{wch:14},{wch:14},{wch:12},{wch:14},{wch:18},{wch:30},{wch:18}];report['!autofilter']={ref:`A1:O${Math.max(1,rows.length+1)}`};
+  const totalIn=rows.filter(row=>row.type===TX.IN).reduce((sum,row)=>sum+Math.abs(Number(row.amount||0)),0),totalOut=rows.filter(row=>row.type===TX.OUT).reduce((sum,row)=>sum+Math.abs(Number(row.amount||0)),0),adjustments=rows.filter(row=>[TX.ADJUST,TX.STOCK_OPNAME].includes(row.type)).length;
+  const summary=XLSX.utils.aoa_to_sheet([['STOKQR - LAPORAN MUTASI STOK'],['Dibuat',new Date().toLocaleString('id-ID')],['Filter',filtersLabel],[],['Total Transaksi',rows.length],['Jumlah Stok Masuk',totalIn],['Jumlah Stok Keluar',totalOut],['Jumlah Penyesuaian / Opname',adjustments]]);summary['!cols']=[{wch:28},{wch:56}];
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,report,'Mutasi Stok');XLSX.utils.book_append_sheet(wb,summary,'Ringkasan');return wb;
+}
+
+export function stockOpnameRows(rows) {
+  return rows.filter(row=>row.type===TX.STOCK_OPNAME).map((row,index)=>{const stamp=new Date(row.createdAt);return {No:index+1,Tanggal:stamp.toLocaleDateString('id-ID'),Jam:stamp.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}),Kode:row.code,'Nama Barang':row.itemName,Kategori:row.category||'-','Stok Sistem':row.before,'Stok Fisik':row.counted,Selisih:row.difference,'Stok Akhir':row.after,User:row.user||'-',Catatan:row.note||'-'};});
+}
+
+export function createStockOpnameWorkbook(XLSX, rows, filtersLabel = 'Semua stok opname') {
+  if (!XLSX?.utils) throw new Error('Library Excel belum tersedia. Sambungkan internet lalu muat ulang.');
+  const opnameRows=rows.filter(row=>row.type===TX.STOCK_OPNAME),report=XLSX.utils.json_to_sheet(stockOpnameRows(opnameRows));report['!cols']=[{wch:7},{wch:14},{wch:10},{wch:18},{wch:28},{wch:18},{wch:14},{wch:14},{wch:12},{wch:14},{wch:18},{wch:30}];report['!autofilter']={ref:`A1:L${Math.max(1,opnameRows.length+1)}`};
+  const stats=stockOpnameStats(opnameRows),summary=XLSX.utils.aoa_to_sheet([['LAPORAN STOK OPNAME'],['Tanggal cetak',new Date().toLocaleString('id-ID')],['Filter',filtersLabel],[],['Total item yang di-opname',stats.total],['Item sesuai',stats.matched],['Item selisih',stats.different],['Adjustment positif',stats.positive],['Adjustment negatif',stats.negative]]);summary['!cols']=[{wch:30},{wch:56}];
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,report,'Stok Opname');XLSX.utils.book_append_sheet(wb,summary,'Ringkasan');return wb;
 }
