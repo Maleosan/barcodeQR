@@ -27,8 +27,6 @@ export class FirebaseAuthService {
 
   async signIn({ requestAdmin = false } = {}) {
     sessionStorage.setItem(REQUEST_KEY, requestAdmin ? 'true' : 'false');
-    const mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-    if (mobile) return signInWithRedirect(this.auth, this.provider);
     try {
       return await signInWithPopup(this.auth, this.provider);
     } catch (error) {
