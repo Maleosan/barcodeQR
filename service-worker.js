@@ -1,16 +1,21 @@
-const CACHE = 'stokqr-v6';
+const CACHE = 'stokqr-v7-firebase';
 const BASE = new URL('./', self.location).pathname;
 const ASSETS = [
   BASE,
   BASE + 'index.html',
   BASE + 'styles.css',
   BASE + 'manifest.webmanifest',
+  BASE + 'firebase-config.js',
   BASE + 'assets/icons/icon.svg',
   BASE + 'src/app.js',
   BASE + 'src/domain.js',
   BASE + 'src/repository.js',
   BASE + 'src/scanner.js',
   BASE + 'src/excel.js',
+  BASE + 'src/firebase/config.js',
+  BASE + 'src/firebase/auth.js',
+  BASE + 'src/firebase/firestore.js',
+  BASE + 'src/firebase/model.js',
   'https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js',
   'https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js',
   'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'

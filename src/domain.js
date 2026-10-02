@@ -17,12 +17,13 @@ export function normalizeItem(input, previous = {}) {
     code: cleanCode(input.code), name: String(input.name || '').trim(),
     category: String(input.category || '').trim() || 'Lainnya', unit: String(input.unit || '').trim() || 'PCS',
     location: String(input.location || '').trim() || '-', stock: Number(input.stock ?? previous.stock ?? 0),
+    price: Number(input.price ?? previous.price ?? 0),
     minimum: Number(input.minimum ?? previous.minimum ?? 0), photo: input.photo ?? previous.photo ?? '',
     active: input.active ?? previous.active ?? true, generated: input.generated ?? previous.generated ?? false,
     createdAt: previous.createdAt || now, updatedAt: now
   };
   if (!item.code || !item.name) throw new Error('Kode dan nama barang wajib diisi.');
-  if (!Number.isFinite(item.stock) || !Number.isFinite(item.minimum) || item.stock < 0 || item.minimum < 0) throw new Error('Stok dan minimum harus berupa angka positif.');
+  if (!Number.isFinite(item.stock) || !Number.isFinite(item.minimum) || !Number.isFinite(item.price) || item.stock < 0 || item.minimum < 0 || item.price < 0) throw new Error('Stok, minimum, dan harga harus berupa angka positif.');
   return item;
 }
 export function calculateTransaction(stock, type, amount) {
